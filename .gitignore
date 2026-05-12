@@ -1,0 +1,8 @@
+/_build/
+/deps/
+/doc/
+/*.ez
+/codex-subagents
+/.cache/
+/.elixir_ls/
+/.claude/
