@@ -1,0 +1,62 @@
+defmodule CodexSubagents.CLITest do
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureIO
+
+  # Pure helpers are exposed as @doc false public functions for testability.
+  # Error paths call System.halt/1 which cannot be caught in tests,
+  # so only happy paths are tested here.
+
+  describe "parse_flags/1" do
+    test "parses valid key-value pairs" do
+      assert CodexSubagents.CLI.parse_flags(["--owner", "alice", "--cwd", "/tmp"]) ==
+               %{"owner" => "alice", "cwd" => "/tmp"}
+    end
+
+    test "returns empty map for empty args" do
+      assert CodexSubagents.CLI.parse_flags([]) == %{}
+    end
+
+    test "parses single flag" do
+      assert CodexSubagents.CLI.parse_flags(["--mode", "any"]) == %{"mode" => "any"}
+    end
+  end
+
+  describe "shell_quote/1" do
+    test "leaves safe strings unchanged" do
+      assert CodexSubagents.CLI.shell_quote("hello_world.txt") == "hello_world.txt"
+    end
+
+    test "quotes strings with spaces and special chars" do
+      assert CodexSubagents.CLI.shell_quote("echo 'hello'") == "'echo '\"'\"'hello'\"'\"''"
+    end
+  end
+
+  describe "parse_mode/1" do
+    test "accepts any" do
+      assert CodexSubagents.CLI.parse_mode("any") == :any
+    end
+
+    test "accepts all" do
+      assert CodexSubagents.CLI.parse_mode("all") == :all
+    end
+  end
+
+  describe "split_csv/1" do
+    test "handles empty string" do
+      assert CodexSubagents.CLI.split_csv("") == []
+    end
+
+    test "handles multiple comma-separated values" do
+      assert CodexSubagents.CLI.split_csv("a,b,c") == ["a", "b", "c"]
+    end
+  end
+
+  describe "main/1" do
+    test "help prints usage" do
+      output = capture_io(fn -> CodexSubagents.CLI.main([]) end)
+      assert output =~ "codex-subagents server"
+      assert output =~ "codex-subagents start"
+    end
+  end
+end
