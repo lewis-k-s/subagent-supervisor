@@ -5,6 +5,7 @@ defmodule CodexSubagents.CLI do
   """
 
   @cookie :codex_subagents
+  @termbox_compatible_terms ["xterm", "screen", "rxvt", "linux", "Eterm", "cygwin"]
 
   def main(argv) do
     case argv do
@@ -15,6 +16,7 @@ defmodule CodexSubagents.CLI do
       ["wait" | rest] -> wait(rest)
       ["list" | rest] -> list(rest)
       ["show" | rest] -> show(rest)
+      ["top"] -> top()
       ["help"] -> help()
       ["--help"] -> help()
       [] -> help()
@@ -107,6 +109,141 @@ defmodule CodexSubagents.CLI do
   end
 
   defp show(_), do: fail("usage: codex-subagents show JOB_ID")
+
+  defp top do
+    start_node!(unique_cli_name())
+    daemon = daemon_name()
+
+    unless Node.connect(daemon) do
+      fail("daemon #{daemon} is not reachable; start it with `codex-subagents server`")
+    end
+
+    ensure_termbox_nif!()
+    normalize_top_terminal_env!()
+    Application.ensure_all_started(:ratatouille)
+    run_top!(daemon)
+  end
+
+  defp run_top!(daemon) do
+    old_trap_exit = Process.flag(:trap_exit, true)
+    Application.put_env(:codex_subagents, :top_daemon, daemon)
+
+    try do
+      case Ratatouille.Runtime.Supervisor.start_link(runtime: [app: CodexSubagents.Top]) do
+        {:ok, pid} ->
+          ref = Process.monitor(pid)
+
+          receive do
+            {:DOWN, ^ref, _, _, _} -> :ok
+            {:EXIT, ^pid, _reason} -> :ok
+          end
+
+        {:error, {:shutdown, {:failed_to_start_child, Ratatouille.Window, reason}}} ->
+          fail_top_window(reason)
+
+        {:error, reason} ->
+          fail("failed to start top: #{inspect(reason)}")
+      end
+    after
+      Process.flag(:trap_exit, old_trap_exit)
+    end
+  end
+
+  defp ensure_termbox_nif! do
+    if termbox_nif_available?() do
+      :ok
+    else
+      load_source_checkout_termbox!()
+    end
+  end
+
+  defp load_source_checkout_termbox! do
+    root = escript_dir()
+    mix_exs = Path.join(root, "mix.exs")
+    ebin = Path.join([root, "_build", "dev", "lib", "ex_termbox", "ebin"])
+    nif = Path.join([root, "_build", "dev", "lib", "ex_termbox", "priv", "termbox_bindings.so"])
+
+    unless File.regular?(mix_exs) and File.dir?(ebin) and File.regular?(nif) do
+      fail("""
+      top requires a release package or a source-checkout escript.
+
+      This executable cannot load ex_termbox's native NIF from inside an escript archive.
+      Expected source-checkout files:
+        #{mix_exs}
+        #{ebin}
+        #{nif}
+      """)
+    end
+
+    Application.unload(:ex_termbox)
+    :code.add_patha(String.to_charlist(ebin))
+
+    unless termbox_nif_available?() do
+      fail("failed to resolve ex_termbox NIF from #{nif}")
+    end
+  end
+
+  defp termbox_nif_available? do
+    case :code.priv_dir(:ex_termbox) do
+      path when is_list(path) ->
+        path
+        |> to_string()
+        |> Path.join("termbox_bindings.so")
+        |> File.regular?()
+
+      _ ->
+        false
+    end
+  end
+
+  @doc false
+  def normalize_top_terminal_env! do
+    term = System.get_env("TERM")
+
+    cond do
+      term in [nil, "", "dumb"] ->
+        force_xterm_compatible!()
+
+      String.contains?(term, "ghostty") ->
+        force_xterm_compatible!()
+
+      String.contains?(term, "tmux") ->
+        force_xterm_compatible!()
+
+      Enum.any?(@termbox_compatible_terms, &String.contains?(term, &1)) ->
+        clear_ghostty_terminfo!()
+
+      true ->
+        force_xterm_compatible!()
+    end
+  end
+
+  defp force_xterm_compatible! do
+    System.put_env("TERM", "xterm-256color")
+    clear_ghostty_terminfo!()
+  end
+
+  defp clear_ghostty_terminfo! do
+    case System.get_env("TERMINFO") do
+      nil -> :ok
+      path -> if String.contains?(path, "Ghostty.app"), do: System.put_env("TERMINFO", "")
+    end
+  end
+
+  defp fail_top_window({{:badmatch, {:error, -1}}, _stack}) do
+    fail("""
+    failed to start top: unsupported terminal #{inspect(System.get_env("TERM"))}
+
+    Try running with a termbox-compatible TERM, for example:
+      TERM=xterm-256color TERMINFO= codex-subagents top
+    """)
+  end
+
+  defp fail_top_window({{:badmatch, {:error, -2}}, _stack}) do
+    fail("failed to start top: could not open a TTY")
+  end
+
+  defp fail_top_window(reason), do: exit(reason)
 
   defp rpc!(module, function, args) do
     start_node!(unique_cli_name())
@@ -240,7 +377,12 @@ defmodule CodexSubagents.CLI do
     codex-subagents wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
     codex-subagents list [--owner OWNER|--session SESSION]
     codex-subagents show JOB_ID
+    codex-subagents top
     """)
+  end
+
+  defp escript_dir do
+    :escript.script_name() |> to_string() |> Path.expand() |> Path.dirname()
   end
 
   defp fail(message) do

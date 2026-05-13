@@ -52,6 +52,15 @@ defmodule CodexSubagents.Registry do
   end
 
   @doc """
+  Returns dashboard state: jobs grouped by owner, concurrency stats,
+  supervision tree children, and daemon start time.
+  """
+  @spec dashboard_state() :: {:ok, map()}
+  def dashboard_state do
+    GenServer.call(__MODULE__, :dashboard_state)
+  end
+
+  @doc """
   Resets all job state. Intended for use in tests.
   """
   @spec reset_for_test(pos_integer()) :: :ok
@@ -77,7 +86,14 @@ defmodule CodexSubagents.Registry do
 
   @impl true
   def init(_opts) do
-    {:ok, %{jobs: %{}, refs: %{}, waiters: [], max_concurrency: max_concurrency()}}
+    {:ok,
+     %{
+       jobs: %{},
+       refs: %{},
+       waiters: [],
+       max_concurrency: max_concurrency(),
+       started_at: DateTime.utc_now()
+     }}
   end
 
   @impl true
@@ -133,6 +149,42 @@ defmodule CodexSubagents.Registry do
 
     {:reply, :ok,
      %{state | jobs: %{}, refs: %{}, waiters: [], max_concurrency: max(max_concurrency, 1)}}
+  end
+
+  def handle_call(:dashboard_state, _from, state) do
+    jobs = state.jobs |> Map.values() |> Enum.map(&public_job/1)
+
+    grouped =
+      jobs
+      |> Enum.group_by(& &1.owner)
+      |> Enum.map(fn {owner, owner_jobs} -> %{owner: owner, jobs: owner_jobs} end)
+      |> Enum.sort_by(& &1.owner)
+
+    running = Enum.count(jobs, &(&1.status == :running))
+    queued = Enum.count(jobs, &(&1.status == :queued))
+
+    {:ok, sup_children} =
+      case Supervisor.which_children(CodexSubagents.Supervisor) do
+        children -> {:ok, format_sup_children(children)}
+      end
+
+    result = %{
+      jobs_by_owner: grouped,
+      total_jobs: length(jobs),
+      running: running,
+      queued: queued,
+      max_concurrency: state.max_concurrency,
+      started_at: state.started_at,
+      supervision_tree: [
+        %{
+          name: "CodexSubagents.Supervisor",
+          type: :supervisor,
+          children: sup_children
+        }
+      ]
+    }
+
+    {:reply, {:ok, result}, state}
   end
 
   def handle_call({:wait, owner, ids, mode, timeout_ms}, from, state) do
@@ -348,4 +400,31 @@ defmodule CodexSubagents.Registry do
     |> Application.get_env(:max_concurrency, 2)
     |> max(1)
   end
+
+  defp format_sup_children(children) do
+    Enum.map(children, fn {id, pid, type, _modules} ->
+      %{
+        name: inspect(id),
+        type: type,
+        pid: format_pid(pid),
+        children: child_grandchildren(id, pid)
+      }
+    end)
+  end
+
+  defp child_grandchildren(:codex_subagents_task_supervisor, pid) when is_pid(pid) do
+    case Task.Supervisor.children(pid) do
+      pids ->
+        Enum.map(
+          pids,
+          &%{name: "Task #{format_pid(&1)}", type: :worker, pid: format_pid(&1), children: []}
+        )
+    end
+  end
+
+  defp child_grandchildren(_id, _pid), do: []
+
+  defp format_pid(nil), do: "not started"
+  defp format_pid(:restarting), do: "restarting"
+  defp format_pid(pid) when is_pid(pid), do: inspect(pid)
 end

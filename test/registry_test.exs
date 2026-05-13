@@ -218,4 +218,47 @@ defmodule CodexSubagents.RegistryTest do
     assert {:ok, jobs_after} = CodexSubagents.Registry.list(nil)
     assert jobs_after == []
   end
+
+  test "dashboard_state returns grouped jobs and concurrency stats" do
+    CodexSubagents.Registry.start_job(%{
+      "owner" => "alpha",
+      "command" => "printf a",
+      "cwd" => File.cwd!()
+    })
+
+    CodexSubagents.Registry.start_job(%{
+      "owner" => "beta",
+      "command" => "sleep 60",
+      "cwd" => File.cwd!()
+    })
+
+    assert {:ok, state} = CodexSubagents.Registry.dashboard_state()
+
+    assert state.total_jobs == 2
+    assert state.max_concurrency == 2
+    assert %DateTime{} = state.started_at
+    assert is_list(state.supervision_tree)
+    assert length(state.supervision_tree) == 1
+
+    assert length(state.jobs_by_owner) == 2
+    owners = Enum.map(state.jobs_by_owner, & &1.owner)
+    assert "alpha" in owners
+    assert "beta" in owners
+
+    assert is_integer(state.running)
+    assert is_integer(state.queued)
+  end
+
+  test "dashboard_state supervision tree has expected structure" do
+    assert {:ok, state} = CodexSubagents.Registry.dashboard_state()
+
+    [sup] = state.supervision_tree
+    assert sup.name == "CodexSubagents.Supervisor"
+    assert sup.type == :supervisor
+    assert is_list(sup.children)
+
+    child_names = Enum.map(sup.children, & &1.name)
+    assert "CodexSubagents.TaskSupervisor" in child_names
+    assert "CodexSubagents.Registry" in child_names
+  end
 end

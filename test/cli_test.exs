@@ -64,6 +64,40 @@ defmodule CodexSubagents.CLITest do
     end
   end
 
+  describe "normalize_top_terminal_env!/0" do
+    setup do
+      original_term = System.get_env("TERM")
+      original_terminfo = System.get_env("TERMINFO")
+
+      on_exit(fn ->
+        restore_env("TERM", original_term)
+        restore_env("TERMINFO", original_terminfo)
+      end)
+
+      :ok
+    end
+
+    test "maps ghostty terminfo to xterm with blank TERMINFO" do
+      System.put_env("TERM", "xterm-ghostty")
+      System.put_env("TERMINFO", "/Applications/Ghostty.app/Contents/Resources/terminfo")
+
+      CodexSubagents.CLI.normalize_top_terminal_env!()
+
+      assert System.get_env("TERM") == "xterm-256color"
+      assert System.get_env("TERMINFO") == ""
+    end
+
+    test "maps tmux terminals to xterm with blank Ghostty TERMINFO" do
+      System.put_env("TERM", "tmux-256color")
+      System.put_env("TERMINFO", "/Applications/Ghostty.app/Contents/Resources/terminfo")
+
+      CodexSubagents.CLI.normalize_top_terminal_env!()
+
+      assert System.get_env("TERM") == "xterm-256color"
+      assert System.get_env("TERMINFO") == ""
+    end
+  end
+
   describe "main/1" do
     test "help prints usage" do
       output = capture_io(fn -> CodexSubagents.CLI.main([]) end)
@@ -72,4 +106,7 @@ defmodule CodexSubagents.CLITest do
       assert output =~ "codex-subagents start"
     end
   end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 end
