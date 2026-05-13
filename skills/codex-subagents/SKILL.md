@@ -10,23 +10,30 @@ Use this skill when a task can be split into subprocess-backed subtasks and the 
 ## Assumptions
 
 - The `codex-subagents` CLI is available on `PATH`.
-- A daemon is running for the workspace:
+- A host-global daemon is running:
 
 ```bash
 epmd -daemon
 codex-subagents server
 ```
 
+- The single daemon is shared by all active Codex sessions on the same host. Create and reuse a distinct session id to isolate waits and filtered lists; use `codex-subagents top` to see all supervised jobs across repositories.
 - Pass the subprocess command and its arguments after `--`. For shell operators such as `;`, pipes, or redirects, use `bash -lc "..."` after `--`.
 - Start the daemon with `--max-concurrency N` to match the Claude Code/GLM concurrency budget. Extra jobs queue until a running job finishes.
-- Use the current Codex thread id, task id, or another stable string as `--owner`.
+- Create a session id once per master Codex thread:
+
+```bash
+codex-subagents session --prefix "$CODEX_THREAD_ID"
+```
+
+Use the returned `session` value for subsequent `--session` calls.
 
 ## Dispatch
 
 Start each subtask with a narrow, self-contained prompt and a label:
 
 ```bash
-codex-subagents start --owner "$CODEX_THREAD_ID" --label "api-slice" --cwd "$PWD" -- claude-code --model glm "Implement the API slice. Return changed files and test output."
+codex-subagents start --session "$CODEX_SUBAGENTS_SESSION" --label "api-slice" --cwd "$PWD" -- claude-code --model glm "Implement the API slice. Return changed files and test output."
 ```
 
 The command prints JSON containing `id`, `status`, `owner`, `label`, and timestamps. Preserve returned ids when the wake rule applies only to a subset of jobs.
@@ -36,9 +43,9 @@ The command prints JSON containing `id`, `status`, `owner`, `label`, and timesta
 Use `wait` to block until the daemon can return completed results:
 
 ```bash
-codex-subagents wait --owner "$CODEX_THREAD_ID" --mode any --timeout 3600
-codex-subagents wait --owner "$CODEX_THREAD_ID" --mode all --timeout 7200
-codex-subagents wait --owner "$CODEX_THREAD_ID" --ids job_a,job_b --mode all --timeout 7200
+codex-subagents wait --session "$CODEX_SUBAGENTS_SESSION" --mode any --timeout 3600
+codex-subagents wait --session "$CODEX_SUBAGENTS_SESSION" --mode all --timeout 7200
+codex-subagents wait --session "$CODEX_SUBAGENTS_SESSION" --ids job_a,job_b --mode all --timeout 7200
 ```
 
 Choose `--mode any` when Codex can make progress from the first returned result, such as reviewing an exploratory finding or starting integration on an independent slice.
@@ -50,13 +57,19 @@ Choose `--mode all` when the next step depends on comparing, merging, or summari
 List active and completed jobs:
 
 ```bash
-codex-subagents list --owner "$CODEX_THREAD_ID"
+codex-subagents list --session "$CODEX_SUBAGENTS_SESSION"
 ```
 
 Fetch one job, including captured output:
 
 ```bash
 codex-subagents show job_a
+```
+
+Open the global dashboard:
+
+```bash
+codex-subagents top
 ```
 
 ## Codex Workflow
