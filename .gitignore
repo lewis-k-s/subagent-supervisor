@@ -6,3 +6,7 @@
 /.cache/
 /.elixir_ls/
 /.claude/
+/.venv/
+/.venv39/
+/pyproject.toml
+/uv.lock

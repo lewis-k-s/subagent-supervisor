@@ -8,7 +8,15 @@ defmodule CodexSubagents.MixProject do
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       escript: [main_module: CodexSubagents.CLI, name: "codex-subagents"],
-      deps: []
+      releases: [
+        codex_subagents: [
+          applications: [
+            codex_subagents: :load
+          ],
+          include_executables_for: [:unix]
+        ]
+      ],
+      deps: [{:ratatouille, "~> 0.5.0"}]
     ]
   end
 
