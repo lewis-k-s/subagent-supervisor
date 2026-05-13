@@ -3,10 +3,19 @@ defmodule CodexSubagents.Top do
   Terminal UI dashboard for visualizing subagent jobs and supervision tree.
 
   Implements the Ratatouille.App behaviour (Elm Architecture) and renders
-  a live dashboard that polls the daemon via RPC every second.
+  a live dashboard that polls the daemon via RPC every second. Supports
+  interactive job selection and full-screen output viewing.
   """
 
   @behaviour Ratatouille.App
+
+  import Ratatouille.Constants, only: [key: 1, event_type: 1]
+
+  @key_esc key(:esc)
+  @key_enter key(:enter)
+  @key_arrow_up key(:arrow_up)
+  @key_arrow_down key(:arrow_down)
+  @event_resize event_type(:resize)
 
   import Ratatouille.View
 
@@ -16,27 +25,40 @@ defmodule CodexSubagents.Top do
   defstruct [
     :daemon,
     :started_at,
+    :window_height,
     jobs_by_owner: [],
+    all_jobs: [],
     total_jobs: 0,
     running: 0,
     queued: 0,
     max_concurrency: 2,
     supervision_tree: [],
     scroll_offset: 0,
+    selected_index: 0,
+    view_mode: :dashboard,
+    selected_job_id: nil,
+    selected_job_output: "",
+    output_scroll: 0,
+    output_auto_scroll: true,
     error: nil
   ]
 
   @type t :: %__MODULE__{}
 
   @impl true
+  def init(%{daemon: daemon, window: %{height: height}}) do
+    model = %__MODULE__{daemon: daemon, window_height: height}
+    fetch_state(model)
+  end
+
   def init(%{daemon: daemon}) do
     model = %__MODULE__{daemon: daemon}
     fetch_state(model)
   end
 
-  def init(%{window: _window}) do
+  def init(%{window: %{height: height}}) do
     daemon = Application.fetch_env!(:codex_subagents, :top_daemon)
-    model = %__MODULE__{daemon: daemon}
+    model = %__MODULE__{daemon: daemon, window_height: height}
     fetch_state(model)
   end
 
@@ -49,25 +71,96 @@ defmodule CodexSubagents.Top do
   def update(model, msg) do
     case msg do
       :tick ->
-        fetch_state(model)
+        model = fetch_state(model)
+
+        if model.view_mode == :output and model.selected_job_id do
+          fetch_output(model)
+        else
+          model
+        end
 
       {:event, %{ch: ?q}} ->
-        System.halt(0)
+        if model.view_mode == :dashboard do
+          System.halt(0)
+        else
+          model
+        end
 
-      {:event, %{key: :arrow_up}} ->
-        %{model | scroll_offset: max(model.scroll_offset - 1, 0)}
+      {:event, %{key: @key_esc}} ->
+        if model.view_mode == :output do
+          %{
+            model
+            | view_mode: :dashboard,
+              selected_job_id: nil,
+              selected_job_output: "",
+              output_scroll: 0
+          }
+        else
+          model
+        end
 
-      {:event, %{key: :arrow_down}} ->
-        %{model | scroll_offset: model.scroll_offset + 1}
+      {:event, %{key: @key_enter}} ->
+        if model.view_mode == :dashboard and model.total_jobs > 0 do
+          job = Enum.at(model.all_jobs, model.selected_index)
+
+          if job do
+            model = %{
+              model
+              | view_mode: :output,
+                selected_job_id: job.id,
+                output_scroll: 0,
+                output_auto_scroll: true
+            }
+
+            fetch_output(model)
+          else
+            model
+          end
+        else
+          model
+        end
+
+      {:event, %{key: @key_arrow_up}} ->
+        handle_arrow_up(model)
+
+      {:event, %{key: @key_arrow_down}} ->
+        handle_arrow_down(model)
+
+      {:event, %{type: @event_resize, h: h}} ->
+        %{model | window_height: h}
 
       _ ->
         model
     end
   end
 
+  defp handle_arrow_up(%{view_mode: :dashboard} = model) do
+    %{model | selected_index: max(model.selected_index - 1, 0)}
+  end
+
+  defp handle_arrow_up(%{view_mode: :output} = model) do
+    %{model | output_scroll: max(model.output_scroll - 1, 0), output_auto_scroll: false}
+  end
+
+  defp handle_arrow_down(%{view_mode: :dashboard} = model) do
+    max_idx = max(model.total_jobs - 1, 0)
+    %{model | selected_index: min(model.selected_index + 1, max_idx)}
+  end
+
+  defp handle_arrow_down(%{view_mode: :output} = model) do
+    %{model | output_scroll: model.output_scroll + 1, output_auto_scroll: false}
+  end
+
   @impl true
   def render(model) do
-    view(top_bar: top_bar(model), bottom_bar: bottom_bar()) do
+    case model.view_mode do
+      :dashboard -> render_dashboard(model)
+      :output -> render_output(model)
+    end
+  end
+
+  defp render_dashboard(model) do
+    view(top_bar: top_bar(model), bottom_bar: dashboard_bottom_bar()) do
       row do
         column size: 12 do
           panel title: "Supervision Tree", height: sup_panel_height(model) do
@@ -94,13 +187,74 @@ defmodule CodexSubagents.Top do
     end
   end
 
+  defp render_output(model) do
+    lines = String.split(model.selected_job_output, "\n")
+
+    output_elements =
+      case lines do
+        [""] ->
+          [label(content: "  (no output yet)", color: :black)]
+
+        _ ->
+          Enum.map(lines, fn line ->
+            label(content: line)
+          end)
+      end
+
+    view(top_bar: output_top_bar(model), bottom_bar: output_bottom_bar()) do
+      panel title: output_panel_title(model) do
+        viewport offset_y: model.output_scroll do
+          output_elements
+        end
+      end
+    end
+  end
+
+  defp output_top_bar(model) do
+    bar do
+      label(
+        content:
+          " codex-subagents | viewing output | up #{format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}"
+      )
+    end
+  end
+
+  defp output_bottom_bar do
+    bar do
+      label(content: " esc back | arrows scroll | q quit")
+    end
+  end
+
+  defp output_panel_title(model) do
+    job = find_selected_job(model)
+
+    if job do
+      id = truncate_id(job.id)
+      label_part = if job.label, do: " [#{job.label}]", else: ""
+      status_part = "#{status_icon(job.status)} #{job.status}"
+      duration = format_duration(job)
+      "Output: #{id}#{label_part} #{status_part} #{duration}"
+    else
+      "Output"
+    end
+  end
+
+  defp find_selected_job(model) do
+    Enum.find(model.all_jobs, &(&1.id == model.selected_job_id))
+  end
+
   defp fetch_state(%__MODULE__{} = model) do
     case :rpc.call(model.daemon, CodexSubagents.Registry, :dashboard_state, []) do
       {:ok, data} ->
+        all_jobs =
+          data.jobs_by_owner
+          |> Enum.flat_map(& &1.jobs)
+
         %__MODULE__{
           model
           | started_at: data.started_at,
             jobs_by_owner: data.jobs_by_owner,
+            all_jobs: all_jobs,
             total_jobs: data.total_jobs,
             running: data.running,
             queued: data.queued,
@@ -114,6 +268,31 @@ defmodule CodexSubagents.Top do
     end
   end
 
+  defp fetch_output(%__MODULE__{} = model) do
+    case :rpc.call(model.daemon, CodexSubagents.Registry, :read_output, [model.selected_job_id]) do
+      {:ok, content} ->
+        scroll =
+          if model.output_auto_scroll do
+            line_count = content |> String.split("\n") |> length()
+            visible = output_visible_lines(model)
+            max(0, line_count - visible)
+          else
+            model.output_scroll
+          end
+
+        %{model | selected_job_output: content, output_scroll: scroll}
+
+      _ ->
+        model
+    end
+  end
+
+  defp output_visible_lines(model) do
+    default = 24
+    height = model.window_height || default
+    height - 4
+  end
+
   defp top_bar(model) do
     bar do
       label(
@@ -123,9 +302,9 @@ defmodule CodexSubagents.Top do
     end
   end
 
-  defp bottom_bar do
+  defp dashboard_bottom_bar do
     bar do
-      label(content: " q quit | arrows scroll")
+      label(content: " q quit | arrows navigate | enter view output")
     end
   end
 
@@ -152,12 +331,19 @@ defmodule CodexSubagents.Top do
   end
 
   defp render_jobs(model) do
-    model.jobs_by_owner
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {owner_group, idx} ->
-      owner_header(owner_group.owner, length(owner_group.jobs), idx == 0) ++
-        owner_job_rows(owner_group.jobs)
-    end)
+    {elements, _idx} =
+      model.jobs_by_owner
+      |> Enum.with_index()
+      |> Enum.reduce({[], 0}, fn {owner_group, group_idx}, {acc, job_idx} ->
+        header = owner_header(owner_group.owner, length(owner_group.jobs), group_idx == 0)
+
+        {rows, next_idx} =
+          owner_job_rows(owner_group.jobs, model.selected_index, job_idx)
+
+        {acc ++ header ++ rows, next_idx}
+      end)
+
+    elements
   end
 
   defp owner_header(owner, count, first?) do
@@ -170,10 +356,26 @@ defmodule CodexSubagents.Top do
       [label(content: "Owner: #{owner} (#{count} jobs)")]
   end
 
-  defp owner_job_rows(jobs) do
-    Enum.map(jobs, fn job ->
-      label(content: job_line(job), color: status_color(job.status))
-    end)
+  defp owner_job_rows(jobs, selected_index, start_idx) do
+    {rows, next_idx} =
+      jobs
+      |> Enum.with_index()
+      |> Enum.map(fn {job, i} ->
+        global_idx = start_idx + i
+        selected? = global_idx == selected_index
+
+        row =
+          if selected? do
+            label(content: job_line(job), color: status_color(job.status), background: :blue)
+          else
+            label(content: job_line(job), color: status_color(job.status))
+          end
+
+        {row, global_idx}
+      end)
+      |> Enum.unzip()
+
+    {rows, (List.first(next_idx) || start_idx) + length(jobs)}
   end
 
   defp job_line(job) do

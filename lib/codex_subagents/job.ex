@@ -13,6 +13,7 @@ defmodule CodexSubagents.Job do
     :status,
     :exit_status,
     :output,
+    :output_path,
     :task_ref,
     :inserted_at,
     :started_at,

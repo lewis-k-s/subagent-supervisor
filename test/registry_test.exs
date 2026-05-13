@@ -261,4 +261,50 @@ defmodule CodexSubagents.RegistryTest do
     assert "CodexSubagents.TaskSupervisor" in child_names
     assert "CodexSubagents.Registry" in child_names
   end
+
+  test "read_output returns output for a completed job" do
+    assert {:ok, job} =
+             CodexSubagents.Registry.start_job(%{
+               "owner" => "read-output",
+               "command" => "printf 'hello world'",
+               "cwd" => File.cwd!()
+             })
+
+    assert {:ok, [finished]} = CodexSubagents.Registry.wait("read-output", [job.id], :all, 5_000)
+    assert finished.status == :succeeded
+
+    assert {:ok, output} = CodexSubagents.Registry.read_output(job.id)
+    assert output == "hello world"
+  end
+
+  test "read_output returns partial output for a running job" do
+    assert {:ok, job} =
+             CodexSubagents.Registry.start_job(%{
+               "owner" => "partial-output",
+               "command" => "printf 'started'; sleep 10; printf 'done'",
+               "cwd" => File.cwd!()
+             })
+
+    Process.sleep(500)
+
+    assert {:ok, output} = CodexSubagents.Registry.read_output(job.id)
+    assert output == "started"
+  end
+
+  test "read_output returns error for unknown id" do
+    assert {:error, :not_found} = CodexSubagents.Registry.read_output("nonexistent")
+  end
+
+  test "stderr is captured in output" do
+    assert {:ok, job} =
+             CodexSubagents.Registry.start_job(%{
+               "owner" => "stderr-test",
+               "command" => "printf stdout; printf stderr >&2",
+               "cwd" => File.cwd!()
+             })
+
+    assert {:ok, [finished]} = CodexSubagents.Registry.wait("stderr-test", [job.id], :all, 5_000)
+    assert finished.output =~ "stdout"
+    assert finished.output =~ "stderr"
+  end
 end

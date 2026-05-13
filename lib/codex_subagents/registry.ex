@@ -69,6 +69,17 @@ defmodule CodexSubagents.Registry do
   end
 
   @doc """
+  Reads the current output for a job from its temp file.
+
+  Returns `{:ok, content}` with partial or full output, or
+  `{:error, :not_found}` / `{:error, :no_output}`.
+  """
+  @spec read_output(String.t()) :: {:ok, String.t()} | {:error, :not_found | :no_output}
+  def read_output(id) do
+    GenServer.call(__MODULE__, {:read_output, id})
+  end
+
+  @doc """
   Blocks until the selected wake rule is satisfied.
 
   * `:any` — returns when at least one matching job finishes.
@@ -86,13 +97,17 @@ defmodule CodexSubagents.Registry do
 
   @impl true
   def init(_opts) do
+    output_dir = Path.join(System.tmp_dir!(), "codex_subagents")
+    File.mkdir_p!(output_dir)
+
     {:ok,
      %{
        jobs: %{},
        refs: %{},
        waiters: [],
        max_concurrency: max_concurrency(),
-       started_at: DateTime.utc_now()
+       started_at: DateTime.utc_now(),
+       output_dir: output_dir
      }}
   end
 
@@ -146,6 +161,9 @@ defmodule CodexSubagents.Registry do
       Process.cancel_timer(waiter.timer)
       GenServer.reply(waiter.from, {:error, :reset})
     end)
+
+    File.rm_rf(state.output_dir)
+    File.mkdir_p!(state.output_dir)
 
     {:reply, :ok,
      %{state | jobs: %{}, refs: %{}, waiters: [], max_concurrency: max(max_concurrency, 1)}}
@@ -202,12 +220,39 @@ defmodule CodexSubagents.Registry do
     end
   end
 
+  def handle_call({:read_output, id}, _from, state) do
+    reply =
+      case Map.fetch(state.jobs, id) do
+        {:ok, %Job{output_path: nil}} ->
+          {:error, :no_output}
+
+        {:ok, %Job{output_path: path}} ->
+          if File.exists?(path) do
+            {:ok, File.read!(path)}
+          else
+            {:error, :no_output}
+          end
+
+        :error ->
+          {:error, :not_found}
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
-  def handle_info({ref, {id, started_at, finished_at, exit_status, output}}, state) do
+  def handle_info({ref, {id, started_at, finished_at, exit_status}}, state) do
     Process.demonitor(ref, [:flush])
 
     state =
       update_job(state, id, fn job ->
+        output =
+          if job.output_path && File.exists?(job.output_path) do
+            File.read!(job.output_path)
+          else
+            ""
+          end
+
         %{
           job
           | status: terminal_status(exit_status),
@@ -229,11 +274,18 @@ defmodule CodexSubagents.Registry do
     state =
       if id do
         update_job(state, id, fn job ->
+          partial =
+            if job.output_path && File.exists?(job.output_path) do
+              "\n" <> File.read!(job.output_path)
+            else
+              ""
+            end
+
           %{
             job
             | status: :failed,
               exit_status: nil,
-              output: "Task process exited before returning: #{inspect(reason)}",
+              output: "Task process exited before returning: #{inspect(reason)}" <> partial,
               finished_at: now(),
               task_ref: nil
           }
@@ -272,22 +324,60 @@ defmodule CodexSubagents.Registry do
       |> Enum.filter(&(&1.status == :queued))
       |> sort_jobs()
       |> Enum.take(available)
-      |> Enum.reduce(state, fn job, acc -> update_job(acc, job.id, &start_job_task/1) end)
+      |> Enum.reduce(state, fn job, acc ->
+        update_job(acc, job.id, &start_job_task(&1, state.output_dir))
+      end)
     end
   end
 
-  defp start_job_task(job) do
+  defp start_job_task(job, output_dir) do
     started_at = now()
+    output_path = Path.join(output_dir, "#{job.id}.log")
+    File.write!(output_path, "")
+    command = job.command
 
     task =
       Task.Supervisor.async_nolink(CodexSubagents.TaskSupervisor, fn ->
-        {output, exit_status} =
-          System.cmd("bash", ["-lc", job.command], cd: job.cwd, stderr_to_stdout: true)
+        port =
+          Port.open(
+            {:spawn_executable, System.find_executable("bash")},
+            [
+              :binary,
+              :use_stdio,
+              :exit_status,
+              {:args, ["-lc", "(#{command}) < /dev/null 2>&1"]},
+              {:cd, String.to_charlist(job.cwd)}
+            ]
+          )
 
-        {job.id, started_at, now(), exit_status, output}
+        exit_status = collect_port_output(port, output_path)
+        {job.id, started_at, now(), exit_status}
       end)
 
-    %{job | status: :running, started_at: started_at, task_ref: task.ref}
+    %{
+      job
+      | status: :running,
+        started_at: started_at,
+        task_ref: task.ref,
+        output_path: output_path
+    }
+  end
+
+  defp collect_port_output(port, path) do
+    receive do
+      {^port, {:data, data}} ->
+        File.write!(path, data, [:append])
+        collect_port_output(port, path)
+
+      {^port, {:exit_status, code}} ->
+        receive do
+          {^port, :closed} -> :ok
+        after
+          100 -> :ok
+        end
+
+        code
+    end
   end
 
   defp running_count(state) do

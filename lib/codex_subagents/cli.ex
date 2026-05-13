@@ -16,6 +16,7 @@ defmodule CodexSubagents.CLI do
       ["wait" | rest] -> wait(rest)
       ["list" | rest] -> list(rest)
       ["show" | rest] -> show(rest)
+      ["tail" | rest] -> tail_cmd(rest)
       ["top"] -> top()
       ["help"] -> help()
       ["--help"] -> help()
@@ -109,6 +110,78 @@ defmodule CodexSubagents.CLI do
   end
 
   defp show(_), do: fail("usage: codex-subagents show JOB_ID")
+
+  defp tail_cmd(args) do
+    {id, follow?} = parse_tail_args(args)
+    start_node!(unique_cli_name())
+    daemon = daemon_name()
+
+    unless Node.connect(daemon) do
+      fail("daemon #{daemon} is not reachable; start it with `codex-subagents server`")
+    end
+
+    if follow? do
+      tail_follow(daemon, id)
+    else
+      tail_once(daemon, id)
+    end
+  end
+
+  defp parse_tail_args(args) do
+    case args do
+      [id, "--follow"] -> {id, true}
+      [id, "-f"] -> {id, true}
+      [id] -> {id, false}
+      _ -> fail("usage: codex-subagents tail JOB_ID [--follow|-f]")
+    end
+  end
+
+  defp tail_once(daemon, id) do
+    case :rpc.call(daemon, CodexSubagents.Registry, :read_output, [id]) do
+      {:ok, content} ->
+        IO.write(content)
+
+      {:error, reason} ->
+        fail("error: #{reason}")
+
+      {:badrpc, reason} ->
+        fail("rpc failed: #{inspect(reason)}")
+    end
+  end
+
+  defp tail_follow(daemon, id) do
+    do_tail_follow(daemon, id, 0)
+  end
+
+  defp do_tail_follow(daemon, id, offset) do
+    case :rpc.call(daemon, CodexSubagents.Registry, :read_output, [id]) do
+      {:ok, content} ->
+        len = byte_size(content)
+
+        if len > offset do
+          IO.write(binary_part(content, offset, len - offset))
+        end
+
+        case :rpc.call(daemon, CodexSubagents.Registry, :show, [id]) do
+          {:ok, %{status: status}} when status in [:succeeded, :failed] ->
+            :ok
+
+          {:ok, _} ->
+            Process.sleep(500)
+            do_tail_follow(daemon, id, len)
+
+          {:error, _} ->
+            :ok
+        end
+
+      {:error, _} ->
+        Process.sleep(500)
+        do_tail_follow(daemon, id, offset)
+
+      {:badrpc, _} ->
+        fail("lost connection to daemon")
+    end
+  end
 
   defp top do
     start_node!(unique_cli_name())
@@ -377,6 +450,7 @@ defmodule CodexSubagents.CLI do
     codex-subagents wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
     codex-subagents list [--owner OWNER|--session SESSION]
     codex-subagents show JOB_ID
+    codex-subagents tail JOB_ID [--follow|-f]
     codex-subagents top
     """)
   end

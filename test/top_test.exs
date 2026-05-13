@@ -1,6 +1,8 @@
 defmodule CodexSubagents.TopTest do
   use ExUnit.Case
 
+  import Ratatouille.Constants, only: [key: 1]
+
   alias CodexSubagents.Top
   alias Ratatouille.Renderer
   alias Ratatouille.Renderer.Canvas
@@ -16,6 +18,7 @@ defmodule CodexSubagents.TopTest do
       model = Top.init(%{window: %{width: 93, height: 44}})
 
       assert model.daemon == :configured_daemon
+      assert model.window_height == 44
       assert model.error =~ "daemon unreachable"
     end
 
@@ -165,27 +168,123 @@ defmodule CodexSubagents.TopTest do
     end
   end
 
-  describe "update/2" do
-    test "arrow up decrements scroll offset with floor at 0" do
-      model = %Top{daemon: :ignored, scroll_offset: 0}
-      assert Top.update(model, {:event, %{key: :arrow_up}}).scroll_offset == 0
+  describe "update/2 - dashboard navigation" do
+    test "arrow up decrements selected_index with floor at 0" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 0, total_jobs: 3}
+      assert Top.update(model, {:event, %{key: key(:arrow_up)}}).selected_index == 0
 
-      model = %Top{daemon: :ignored, scroll_offset: 3}
-      assert Top.update(model, {:event, %{key: :arrow_up}}).scroll_offset == 2
+      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 3, total_jobs: 5}
+      assert Top.update(model, {:event, %{key: key(:arrow_up)}}).selected_index == 2
     end
 
-    test "arrow down increments scroll offset" do
-      model = %Top{daemon: :ignored, scroll_offset: 5}
-      assert Top.update(model, {:event, %{key: :arrow_down}}).scroll_offset == 6
+    test "arrow down increments selected_index capped at total - 1" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 2, total_jobs: 5}
+      assert Top.update(model, {:event, %{key: key(:arrow_down)}}).selected_index == 3
+
+      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 4, total_jobs: 5}
+      assert Top.update(model, {:event, %{key: key(:arrow_down)}}).selected_index == 4
     end
 
-    test "unknown messages return model unchanged" do
-      model = %Top{daemon: :ignored, scroll_offset: 7}
-      assert Top.update(model, {:event, %{ch: ?x}}).scroll_offset == 7
+    test "q halts in dashboard mode" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard}
+      assert catch_exit(Top.update(model, {:event, %{ch: ?q}}))
     end
   end
 
-  describe "render/1" do
+  describe "update/2 - output mode" do
+    test "escape returns to dashboard" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        selected_job_id: "job_123",
+        selected_job_output: "some output",
+        output_scroll: 5
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:esc)}})
+      assert updated.view_mode == :dashboard
+      assert updated.selected_job_id == nil
+      assert updated.selected_job_output == ""
+      assert updated.output_scroll == 0
+    end
+
+    test "arrow up decrements output_scroll with floor at 0 and disables auto-scroll" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        output_scroll: 0,
+        output_auto_scroll: true
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:arrow_up)}})
+      assert updated.output_scroll == 0
+      assert updated.output_auto_scroll == false
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        output_scroll: 5,
+        output_auto_scroll: true
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:arrow_up)}})
+      assert updated.output_scroll == 4
+      assert updated.output_auto_scroll == false
+    end
+
+    test "arrow down increments output_scroll and disables auto-scroll" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        output_scroll: 3,
+        output_auto_scroll: true
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:arrow_down)}})
+      assert updated.output_scroll == 4
+      assert updated.output_auto_scroll == false
+    end
+
+    test "q does not halt in output mode" do
+      model = %Top{daemon: :ignored, view_mode: :output}
+      updated = Top.update(model, {:event, %{ch: ?q}})
+      assert updated.view_mode == :output
+    end
+  end
+
+  describe "update/2 - enter to view output" do
+    test "enter switches to output mode when jobs exist" do
+      job = %{
+        id: "job_abc123",
+        status: :succeeded,
+        started_at: DateTime.utc_now(),
+        finished_at: DateTime.utc_now(),
+        label: "test",
+        command: "echo hi",
+        inserted_at: DateTime.utc_now()
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 0,
+        total_jobs: 1,
+        all_jobs: [job]
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:enter)}})
+      assert updated.view_mode == :output
+      assert updated.selected_job_id == "job_abc123"
+    end
+
+    test "enter does nothing when no jobs" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard, total_jobs: 0, all_jobs: []}
+      updated = Top.update(model, {:event, %{key: key(:enter)}})
+      assert updated.view_mode == :dashboard
+    end
+  end
+
+  describe "render/1 - dashboard" do
     test "renders supervision tree roots without pid" do
       model = %Top{
         daemon: :ignored,
@@ -218,6 +317,17 @@ defmodule CodexSubagents.TopTest do
       model = %Top{
         daemon: :ignored,
         total_jobs: 1,
+        all_jobs: [
+          %{
+            id: "job_abcdefgh",
+            status: :succeeded,
+            started_at: now,
+            finished_at: now,
+            label: "hello",
+            command: "echo hello",
+            inserted_at: now
+          }
+        ],
         jobs_by_owner: [
           %{
             owner: "owner-a",
@@ -228,7 +338,8 @@ defmodule CodexSubagents.TopTest do
                 started_at: now,
                 finished_at: now,
                 label: "hello",
-                command: "echo hello"
+                command: "echo hello",
+                inserted_at: now
               }
             ]
           }
@@ -241,6 +352,105 @@ defmodule CodexSubagents.TopTest do
       assert output =~ "Owner: owner-a"
       assert output =~ "hello"
       assert output =~ "echo hello"
+    end
+
+    test "renders selected job with blue background" do
+      now = DateTime.utc_now()
+
+      model = %Top{
+        daemon: :ignored,
+        total_jobs: 1,
+        selected_index: 0,
+        all_jobs: [
+          %{
+            id: "job_abcdefgh",
+            status: :succeeded,
+            started_at: now,
+            finished_at: now,
+            label: "hello",
+            command: "echo hello",
+            inserted_at: now
+          }
+        ],
+        jobs_by_owner: [
+          %{
+            owner: "owner-a",
+            jobs: [
+              %{
+                id: "job_abcdefgh",
+                status: :succeeded,
+                started_at: now,
+                finished_at: now,
+                label: "hello",
+                command: "echo hello",
+                inserted_at: now
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Owner: owner-a"
+    end
+  end
+
+  describe "render/1 - output mode" do
+    test "renders output view with panel title" do
+      now = DateTime.utc_now()
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        selected_job_id: "job_abc123",
+        selected_job_output: "line1\nline2\nline3",
+        all_jobs: [
+          %{
+            id: "job_abc123",
+            status: :succeeded,
+            started_at: now,
+            finished_at: now,
+            label: "test-job",
+            command: "echo hi",
+            inserted_at: now
+          }
+        ]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Output: job_abc1"
+      assert output =~ "test-job"
+      assert output =~ "line1"
+      assert output =~ "line2"
+      assert output =~ "line3"
+    end
+
+    test "renders no output yet message when empty" do
+      now = DateTime.utc_now()
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        selected_job_id: "job_abc123",
+        selected_job_output: "",
+        all_jobs: [
+          %{
+            id: "job_abc123",
+            status: :running,
+            started_at: now,
+            finished_at: nil,
+            label: nil,
+            command: "echo hi",
+            inserted_at: now
+          }
+        ]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "no output yet"
     end
   end
 end
