@@ -10,6 +10,7 @@ defmodule CodexSubagents.CLI do
     case argv do
       ["server" | rest] -> server(rest)
       ["stop"] -> stop()
+      ["session" | rest] -> session(rest)
       ["start" | rest] -> start(rest)
       ["wait" | rest] -> wait(rest)
       ["list" | rest] -> list(rest)
@@ -52,12 +53,19 @@ defmodule CodexSubagents.CLI do
     end
   end
 
+  defp session(rest) do
+    opts = parse_flags(rest)
+    id = new_session_id(Map.get(opts, "prefix", "session"))
+
+    IO.puts(CodexSubagents.JSON.encode(%{owner: id, session: id}))
+  end
+
   defp start(rest) do
     {flags, command} = split_command(rest)
     opts = parse_flags(flags)
 
     attrs = %{
-      "owner" => Map.get(opts, "owner"),
+      "owner" => session_owner(opts),
       "label" => Map.get(opts, "label"),
       "cwd" => Map.get(opts, "cwd", File.cwd!()),
       "command" => shell_join(command)
@@ -71,7 +79,7 @@ defmodule CodexSubagents.CLI do
 
   defp wait(rest) do
     opts = parse_flags(rest)
-    owner = Map.get(opts, "owner")
+    owner = session_owner(opts)
     mode = parse_mode(Map.get(opts, "mode", "all"))
     timeout_ms = opts |> Map.get("timeout", "86400") |> String.to_integer() |> Kernel.*(1_000)
     ids = opts |> Map.get("ids", "") |> split_csv()
@@ -89,7 +97,7 @@ defmodule CodexSubagents.CLI do
   defp list(rest) do
     opts = parse_flags(rest)
 
-    rpc!(CodexSubagents.Registry, :list, [Map.get(opts, "owner")])
+    rpc!(CodexSubagents.Registry, :list, [session_owner(opts)])
     |> print_result()
   end
 
@@ -137,7 +145,11 @@ defmodule CodexSubagents.CLI do
   end
 
   defp unique_cli_name do
-    suffix = System.unique_integer([:positive])
+    suffix =
+      [System.pid(), random_token(4)]
+      |> Enum.join("_")
+      |> String.replace(~r/[^A-Za-z0-9_]/, "_")
+
     :"codex_subagents_cli_#{suffix}"
   end
 
@@ -169,6 +181,15 @@ defmodule CodexSubagents.CLI do
   def split_csv(""), do: []
   def split_csv(value), do: value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 
+  @doc false
+  def session_owner(opts), do: Map.get(opts, "owner") || Map.get(opts, "session")
+
+  @doc false
+  def new_session_id(prefix \\ "session") do
+    prefix = slug(prefix)
+    "#{prefix}-#{random_token(5)}"
+  end
+
   defp shell_join(args), do: Enum.map_join(args, " ", &shell_quote/1)
 
   @doc false
@@ -185,6 +206,25 @@ defmodule CodexSubagents.CLI do
   def parse_mode("all"), do: :all
   def parse_mode(_), do: fail("--mode must be any or all")
 
+  defp random_token(bytes) do
+    bytes
+    |> :crypto.strong_rand_bytes()
+    |> Base.url_encode64(padding: false)
+    |> String.downcase()
+  end
+
+  defp slug(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> "session"
+      slug -> String.slice(slug, 0, 24)
+    end
+  end
+
   defp require_option!(attrs, key) do
     if Map.get(attrs, key) in [nil, ""] do
       fail("missing required --#{key}")
@@ -195,9 +235,10 @@ defmodule CodexSubagents.CLI do
     IO.puts("""
     codex-subagents server [--max-concurrency 2]
     codex-subagents stop
-    codex-subagents start --owner OWNER [--label LABEL] [--cwd DIR] -- BASH COMMAND
-    codex-subagents wait --owner OWNER [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
-    codex-subagents list [--owner OWNER]
+    codex-subagents session [--prefix PREFIX]
+    codex-subagents start --owner OWNER|--session SESSION [--label LABEL] [--cwd DIR] -- BASH COMMAND
+    codex-subagents wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
+    codex-subagents list [--owner OWNER|--session SESSION]
     codex-subagents show JOB_ID
     """)
   end

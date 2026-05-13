@@ -1,11 +1,7 @@
 defmodule CodexSubagents.CLITest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
-
-  # Pure helpers are exposed as @doc false public functions for testability.
-  # Error paths call System.halt/1 which cannot be caught in tests,
-  # so only happy paths are tested here.
 
   describe "parse_flags/1" do
     test "parses valid key-value pairs" do
@@ -52,10 +48,27 @@ defmodule CodexSubagents.CLITest do
     end
   end
 
+  describe "session helpers" do
+    test "session_owner prefers owner and falls back to session" do
+      assert CodexSubagents.CLI.session_owner(%{"owner" => "owner-a", "session" => "session-a"}) ==
+               "owner-a"
+
+      assert CodexSubagents.CLI.session_owner(%{"session" => "session-a"}) == "session-a"
+      assert CodexSubagents.CLI.session_owner(%{}) == nil
+    end
+
+    test "new_session_id returns a short readable slug with random suffix" do
+      id = CodexSubagents.CLI.new_session_id("Master Agent")
+
+      assert id =~ ~r/^master-agent-[a-z0-9_-]{7}$/
+    end
+  end
+
   describe "main/1" do
     test "help prints usage" do
       output = capture_io(fn -> CodexSubagents.CLI.main([]) end)
       assert output =~ "codex-subagents server"
+      assert output =~ "codex-subagents session"
       assert output =~ "codex-subagents start"
     end
   end
