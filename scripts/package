@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+INSTALL_DIR=${1:-"$ROOT/dist/codex-subagents"}
+RELEASE_DIR="$INSTALL_DIR/libexec/codex_subagents"
+WRAPPER_DIR="$INSTALL_DIR/bin"
+WRAPPER="$WRAPPER_DIR/codex-subagents"
+
+cd "$ROOT"
+MIX_ENV=prod mix release --overwrite --path "$RELEASE_DIR"
+
+mkdir -p "$WRAPPER_DIR"
+
+cat > "$WRAPPER" <<'SH'
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+RELEASE_BIN="$SCRIPT_DIR/../libexec/codex_subagents/bin/codex_subagents"
+
+exec "$RELEASE_BIN" eval 'CodexSubagents.CLI.main(System.argv())' "$@"
+SH
+
+chmod +x "$WRAPPER"
+
+printf 'Packaged codex-subagents at %s\n' "$INSTALL_DIR"
+printf 'Add %s to PATH\n' "$WRAPPER_DIR"
