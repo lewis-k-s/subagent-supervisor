@@ -18,7 +18,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "thread-1",
-               "command" => "printf hello",
+               "command" => "bash -c 'printf hello'",
                "cwd" => File.cwd!()
              })
 
@@ -32,14 +32,14 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, _slow} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "thread-2",
-               "command" => "sleep 1; printf slow",
+               "command" => "bash -c 'sleep 1; printf slow'",
                "cwd" => File.cwd!()
              })
 
     assert {:ok, fast} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "thread-2",
-               "command" => "printf fast",
+               "command" => "bash -c 'printf fast'",
                "cwd" => File.cwd!()
              })
 
@@ -53,14 +53,14 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, running} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "thread-3",
-               "command" => "sleep 1; printf first",
+               "command" => "bash -c 'sleep 1; printf first'",
                "cwd" => File.cwd!()
              })
 
     assert {:ok, queued} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "thread-3",
-               "command" => "printf second",
+               "command" => "bash -c 'printf second'",
                "cwd" => File.cwd!()
              })
 
@@ -75,7 +75,7 @@ defmodule SubagentSupervisor.RegistryTest do
   test "start_job raises on missing owner" do
     assert catch_exit(
              SubagentSupervisor.Registry.start_job(%{
-               "command" => "echo hi",
+               "command" => "bash -c 'echo hi'",
                "cwd" => File.cwd!()
              })
            )
@@ -94,16 +94,44 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:error, :not_found} = SubagentSupervisor.Registry.show("nonexistent")
   end
 
+  test "show without --full omits output" do
+    assert {:ok, job} =
+             SubagentSupervisor.Registry.start_job(%{
+               "owner" => "show-no-output",
+               "command" => "bash -c 'printf hello'",
+               "cwd" => File.cwd!()
+             })
+
+    assert {:ok, [_]} = SubagentSupervisor.Registry.wait("show-no-output", [job.id], :all, 5_000)
+    assert {:ok, found} = SubagentSupervisor.Registry.show(job.id)
+    refute Map.has_key?(found, :output)
+  end
+
+  test "show with include_output: true returns full output" do
+    assert {:ok, job} =
+             SubagentSupervisor.Registry.start_job(%{
+               "owner" => "show-full-output",
+               "command" => "bash -c 'printf hello'",
+               "cwd" => File.cwd!()
+             })
+
+    assert {:ok, [_]} =
+             SubagentSupervisor.Registry.wait("show-full-output", [job.id], :all, 5_000)
+
+    assert {:ok, found} = SubagentSupervisor.Registry.show(job.id, include_output: true)
+    assert found.output == "hello"
+  end
+
   test "list filters by owner; list(nil) returns all" do
     SubagentSupervisor.Registry.start_job(%{
       "owner" => "alpha",
-      "command" => "printf a",
+      "command" => "bash -c 'printf a'",
       "cwd" => File.cwd!()
     })
 
     SubagentSupervisor.Registry.start_job(%{
       "owner" => "beta",
-      "command" => "printf b",
+      "command" => "bash -c 'printf b'",
       "cwd" => File.cwd!()
     })
 
@@ -119,7 +147,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, _job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "fail-test",
-               "command" => "exit 1",
+               "command" => "bash -c 'exit 1'",
                "cwd" => File.cwd!()
              })
 
@@ -132,7 +160,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, _job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "timeout-test",
-               "command" => "sleep 10",
+               "command" => "bash -c 'sleep 10'",
                "cwd" => File.cwd!()
              })
 
@@ -144,7 +172,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "any-done",
-               "command" => "printf done",
+               "command" => "bash -c 'printf done'",
                "cwd" => File.cwd!()
              })
 
@@ -159,7 +187,7 @@ defmodule SubagentSupervisor.RegistryTest do
              SubagentSupervisor.Registry.start_job(%{
                "id" => "my-custom-id",
                "owner" => "custom-id",
-               "command" => "printf custom",
+               "command" => "bash -c 'printf custom'",
                "cwd" => File.cwd!()
              })
 
@@ -173,7 +201,7 @@ defmodule SubagentSupervisor.RegistryTest do
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "label-test",
                "label" => "my-label",
-               "command" => "printf labeled",
+               "command" => "bash -c 'printf labeled'",
                "cwd" => File.cwd!()
              })
 
@@ -185,14 +213,14 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, _a} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "owner-a",
-               "command" => "printf a",
+               "command" => "bash -c 'printf a'",
                "cwd" => File.cwd!()
              })
 
     assert {:ok, _b} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "owner-b",
-               "command" => "printf b",
+               "command" => "bash -c 'printf b'",
                "cwd" => File.cwd!()
              })
 
@@ -206,7 +234,7 @@ defmodule SubagentSupervisor.RegistryTest do
   test "reset_for_test clears all state" do
     SubagentSupervisor.Registry.start_job(%{
       "owner" => "reset-test",
-      "command" => "sleep 60",
+      "command" => "bash -c 'sleep 60'",
       "cwd" => File.cwd!()
     })
 
@@ -222,13 +250,13 @@ defmodule SubagentSupervisor.RegistryTest do
   test "dashboard_state returns grouped jobs and concurrency stats" do
     SubagentSupervisor.Registry.start_job(%{
       "owner" => "alpha",
-      "command" => "printf a",
+      "command" => "bash -c 'printf a'",
       "cwd" => File.cwd!()
     })
 
     SubagentSupervisor.Registry.start_job(%{
       "owner" => "beta",
-      "command" => "sleep 60",
+      "command" => "bash -c 'sleep 60'",
       "cwd" => File.cwd!()
     })
 
@@ -266,7 +294,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "read-output",
-               "command" => "printf 'hello world'",
+               "command" => "bash -c 'printf \"hello world\"'",
                "cwd" => File.cwd!()
              })
 
@@ -283,7 +311,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "partial-output",
-               "command" => "printf 'started'; sleep 10; printf 'done'",
+               "command" => "bash -c 'printf started; sleep 10; printf done'",
                "cwd" => File.cwd!()
              })
 
@@ -301,7 +329,7 @@ defmodule SubagentSupervisor.RegistryTest do
     assert {:ok, job} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "stderr-test",
-               "command" => "printf stdout; printf stderr >&2",
+               "command" => "bash -c 'printf stdout; printf stderr >&2'",
                "cwd" => File.cwd!()
              })
 
@@ -310,6 +338,63 @@ defmodule SubagentSupervisor.RegistryTest do
 
     assert finished.output =~ "stdout"
     assert finished.output =~ "stderr"
+  end
+
+  describe "status" do
+    test "returns not_found for unknown id" do
+      assert {:error, :not_found} = SubagentSupervisor.Registry.status("nonexistent")
+    end
+
+    test "returns metadata and output digest for a completed job" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "status-done",
+                 "command" => "bash -c 'printf \"hello world\"'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [_]} =
+               SubagentSupervisor.Registry.wait("status-done", [job.id], :all, 5_000)
+
+      assert {:ok, result} = SubagentSupervisor.Registry.status(job.id)
+      assert result.id == job.id
+      assert result.status == :succeeded
+      assert result.owner == "status-done"
+      assert result.output_digest == "hello world"
+      assert %DateTime{} = result.started_at
+      assert %DateTime{} = result.finished_at
+    end
+
+    test "returns partial output digest for a running job" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "status-running",
+                 "command" => "bash -c 'printf started; sleep 10; printf done'",
+                 "cwd" => File.cwd!()
+               })
+
+      Process.sleep(500)
+
+      assert {:ok, result} = SubagentSupervisor.Registry.status(job.id)
+      assert result.status == :running
+      assert result.output_digest == "started"
+    end
+
+    test "truncates long output" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "status-long",
+                 "command" => "bash -c 'python3 -c \"print(chr(120) * 5000)\"'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [_]} =
+               SubagentSupervisor.Registry.wait("status-long", [job.id], :all, 5_000)
+
+      assert {:ok, result} = SubagentSupervisor.Registry.status(job.id)
+      digest = result.output_digest
+      assert String.contains?(digest, "[truncated]")
+    end
   end
 
   describe "command validation" do
@@ -324,35 +409,29 @@ defmodule SubagentSupervisor.RegistryTest do
     end
 
     test "rejects launcher followed by semicolon (shell injection)" do
-      launcher = System.find_executable("bash")
-
       assert catch_exit(
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "validate-test",
-                 "command" => "#{launcher}; echo injected",
+                 "command" => "bash; echo injected",
                  "cwd" => File.cwd!()
                })
              )
     end
 
     test "accepts launcher followed by a space and arguments" do
-      launcher = System.find_executable("bash")
-
       assert {:ok, _job} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "validate-test",
-                 "command" => "#{launcher} -c 'echo ok'",
+                 "command" => "bash -c 'echo ok'",
                  "cwd" => File.cwd!()
                })
     end
 
     test "accepts bare launcher without arguments" do
-      launcher = System.find_executable("bash")
-
       assert {:ok, _job} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "validate-test",
-                 "command" => launcher,
+                 "command" => "bash",
                  "cwd" => File.cwd!()
                })
     end

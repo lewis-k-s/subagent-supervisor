@@ -43,13 +43,28 @@ defmodule SubagentSupervisor.Registry do
   end
 
   @doc """
-  Returns the full details of a single job including captured output.
+  Returns the details of a single job.
+
+  By default, output is omitted. Pass `include_output: true` to include
+  the full captured output, or `include_output: :digest` to include a
+  truncated digest.
 
   Returns `{:error, :not_found}` when the id does not exist.
   """
-  @spec show(String.t()) :: {:ok, map()} | {:error, :not_found}
-  def show(id) do
-    GenServer.call(__MODULE__, {:show, id})
+  @spec show(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def show(id, opts \\ []) do
+    GenServer.call(__MODULE__, {:show, id, opts})
+  end
+
+  @doc """
+  Returns a lightweight status digest for a job: metadata plus a
+  truncated view of the output.
+
+  Returns `{:error, :not_found}` when the id does not exist.
+  """
+  @spec status(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def status(id) do
+    GenServer.call(__MODULE__, {:status, id})
   end
 
   @doc """
@@ -164,10 +179,30 @@ defmodule SubagentSupervisor.Registry do
     {:reply, {:ok, jobs}, state}
   end
 
-  def handle_call({:show, id}, _from, state) do
+  def handle_call({:show, id, opts}, _from, state) do
     reply =
       case Map.fetch(state.jobs, id) do
-        {:ok, job} -> {:ok, public_job(job, include_output: true)}
+        {:ok, job} ->
+          include_output =
+            case Keyword.get(opts, :include_output) do
+              true -> true
+              :digest -> :digest
+              _ -> false
+            end
+
+          {:ok, public_job(job, include_output: include_output)}
+
+        :error ->
+          {:error, :not_found}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:status, id}, _from, state) do
+    reply =
+      case Map.fetch(state.jobs, id) do
+        {:ok, job} -> {:ok, build_status(job, state)}
         :error -> {:error, :not_found}
       end
 
@@ -518,9 +553,56 @@ defmodule SubagentSupervisor.Registry do
       finished_at: job.finished_at
     }
 
-    if Keyword.get(opts, :include_output, false),
-      do: Map.put(base, :output, job.output),
-      else: base
+    case Keyword.get(opts, :include_output, false) do
+      true -> Map.put(base, :output, job.output)
+      :digest -> Map.put(base, :output, job.output)
+      _ -> base
+    end
+  end
+
+  defp build_status(job, _state) do
+    raw_output = read_job_output(job)
+
+    output_digest =
+      case raw_output do
+        nil ->
+          nil
+
+        "" ->
+          ""
+
+        raw ->
+          text = StreamJSON.extract_text(raw)
+          truncate_text(text)
+      end
+
+    %{
+      id: job.id,
+      label: job.label,
+      status: job.status,
+      owner: job.owner,
+      started_at: job.started_at,
+      finished_at: job.finished_at,
+      output_digest: output_digest
+    }
+  end
+
+  defp read_job_output(%Job{output_path: nil}), do: nil
+
+  defp read_job_output(%Job{output_path: path}) do
+    if File.exists?(path), do: File.read!(path), else: nil
+  end
+
+  @max_digest 4000
+  @head_chars 500
+  @tail_chars 3000
+
+  defp truncate_text(text) when byte_size(text) <= @max_digest, do: text
+
+  defp truncate_text(text) do
+    head = String.slice(text, 0, @head_chars)
+    tail = String.slice(text, String.length(text) - @tail_chars, @tail_chars)
+    head <> "\n\n... [truncated] ...\n\n" <> tail
   end
 
   defp required!(attrs, key) do

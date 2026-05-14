@@ -97,9 +97,9 @@ defmodule SubagentSupervisor.StreamJSONTest do
   end
 
   describe "format_incremental/2" do
-    test "returns empty text when no new content" do
-      assert StreamJSON.format_incremental("hello", 5) == {"", 5}
-      assert StreamJSON.format_incremental("hello", 10) == {"", 10}
+    test "returns empty tagged list when no new content" do
+      assert StreamJSON.format_incremental("hello", 5) == {[], 5}
+      assert StreamJSON.format_incremental("hello", 10) == {[], 10}
     end
 
     test "extracts text from streaming text_delta events" do
@@ -123,8 +123,8 @@ defmodule SubagentSupervisor.StreamJSONTest do
           }
         ])
 
-      {text, offset} = StreamJSON.format_incremental(content, 0)
-      assert text == "Hi there!"
+      {tagged, offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"Hi there!", nil}]
       assert offset == byte_size(content)
     end
 
@@ -149,8 +149,8 @@ defmodule SubagentSupervisor.StreamJSONTest do
           }
         ])
 
-      {text, _offset} = StreamJSON.format_incremental(content, 0)
-      assert text == "visible"
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"visible", nil}]
     end
 
     test "formats tool_use block starts" do
@@ -166,8 +166,8 @@ defmodule SubagentSupervisor.StreamJSONTest do
           }
         ])
 
-      {text, _offset} = StreamJSON.format_incremental(content, 0)
-      assert text == "\n[Tool: Bash]\n"
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"\n[Tool: Bash]\n", nil}]
     end
 
     test "handles incomplete trailing lines safely" do
@@ -187,8 +187,8 @@ defmodule SubagentSupervisor.StreamJSONTest do
 
       content = complete <> incomplete
 
-      {text, offset} = StreamJSON.format_incremental(content, 0)
-      assert text == "ok"
+      {tagged, offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"ok", nil}]
       assert offset == byte_size(complete)
     end
 
@@ -209,16 +209,16 @@ defmodule SubagentSupervisor.StreamJSONTest do
         ~s({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"second"}})
 
       content_after_chunk1 = chunk1 <> incomplete
-      {text1, offset1} = StreamJSON.format_incremental(content_after_chunk1, 0)
-      assert text1 == "first"
+      {tagged1, offset1} = StreamJSON.format_incremental(content_after_chunk1, 0)
+      assert tagged1 == [{"first", nil}]
 
       content_final = content_after_chunk1 <> ~s(})
-      {text2, offset2} = StreamJSON.format_incremental(content_final, offset1)
-      assert text2 == "second"
+      {tagged2, offset2} = StreamJSON.format_incremental(content_final, offset1)
+      assert tagged2 == [{"second", nil}]
       assert offset2 == byte_size(content_final)
     end
 
-    test "assistant message snapshots are suppressed in incremental output" do
+    test "assistant text-only snapshots are suppressed in incremental output" do
       content =
         json_lines([
           %{
@@ -245,8 +245,8 @@ defmodule SubagentSupervisor.StreamJSONTest do
           }
         ])
 
-      {text, _offset} = StreamJSON.format_incremental(content, 0)
-      assert text == "Hello world"
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"Hello world", nil}]
     end
 
     test "formats incremental output from offset" do
@@ -276,8 +276,163 @@ defmodule SubagentSupervisor.StreamJSONTest do
 
       full = prefix <> suffix
 
-      {text, _offset} = StreamJSON.format_incremental(full, byte_size(prefix))
-      assert text == " new"
+      {tagged, _offset} = StreamJSON.format_incremental(full, byte_size(prefix))
+      assert tagged == [{" new", nil}]
+    end
+
+    test "assistant tool_use snapshots show input details" do
+      content =
+        json_lines([
+          %{
+            "type" => "assistant",
+            "message" => %{
+              "content" => [
+                %{"type" => "tool_use", "name" => "Bash", "input" => %{"command" => "echo hello"}}
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{~s([Tool: Bash] $ echo hello), nil}]
+    end
+
+    test "assistant tool_use snapshots show file path for Edit" do
+      content =
+        json_lines([
+          %{
+            "type" => "assistant",
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_use",
+                  "name" => "Edit",
+                  "input" => %{"file_path" => "/tmp/test.ex"}
+                }
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{~s([Tool: Edit] /tmp/test.ex), nil}]
+    end
+
+    test "assistant tool_use snapshots show file path for Read" do
+      content =
+        json_lines([
+          %{
+            "type" => "assistant",
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_use",
+                  "name" => "Read",
+                  "input" => %{"file_path" => "lib/foo.ex"}
+                }
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{~s([Tool: Read] lib/foo.ex), nil}]
+    end
+
+    test "assistant tool_use with unknown tool shows JSON input" do
+      content =
+        json_lines([
+          %{
+            "type" => "assistant",
+            "message" => %{
+              "content" => [
+                %{"type" => "tool_use", "name" => "Custom", "input" => %{"key" => "val"}}
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{~s([Tool: Custom] {"key":"val"}), nil}]
+    end
+
+    test "assistant tool_use with empty input shows name only" do
+      content =
+        json_lines([
+          %{
+            "type" => "assistant",
+            "message" => %{
+              "content" => [
+                %{"type" => "tool_use", "name" => "Bash", "input" => %{}}
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{~s([Tool: Bash]), nil}]
+    end
+
+    test "user tool errors show as red tagged lines" do
+      content =
+        json_lines([
+          %{
+            "type" => "user",
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_result",
+                  "is_error" => true,
+                  "content" => "Tool execution denied"
+                }
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"Tool execution denied", :red}]
+    end
+
+    test "user tool errors with block content show as red" do
+      content =
+        json_lines([
+          %{
+            "type" => "user",
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_result",
+                  "is_error" => true,
+                  "content" => [%{"type" => "text", "text" => "Permission denied"}]
+                }
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == [{"Permission denied", :red}]
+    end
+
+    test "user non-error tool results are suppressed" do
+      content =
+        json_lines([
+          %{
+            "type" => "user",
+            "message" => %{
+              "content" => [
+                %{
+                  "type" => "tool_result",
+                  "content" => "normal output"
+                }
+              ]
+            }
+          }
+        ])
+
+      {tagged, _offset} = StreamJSON.format_incremental(content, 0)
+      assert tagged == []
     end
   end
 

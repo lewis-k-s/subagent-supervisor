@@ -18,6 +18,7 @@ defmodule SubagentSupervisor.CLI do
       ["wait" | rest] -> wait(rest)
       ["list" | rest] -> list(rest)
       ["show" | rest] -> show(rest)
+      ["status" | rest] -> status_cmd(rest)
       ["tail" | rest] -> tail_cmd(rest)
       ["top"] -> top()
       ["help"] -> help()
@@ -123,12 +124,44 @@ defmodule SubagentSupervisor.CLI do
     |> print_result()
   end
 
-  defp show([id]) do
-    rpc!(SubagentSupervisor.Registry, :show, [id])
+  defp show(args) do
+    {id, full?} = parse_show_args(args)
+
+    opts = if full?, do: [include_output: true], else: []
+
+    rpc!(SubagentSupervisor.Registry, :show, [id, opts])
     |> print_result()
   end
 
-  defp show(_), do: fail("usage: subagent-supervisor show JOB_ID")
+  defp parse_show_args(args) do
+    full? = "--full" in args
+    args = Enum.reject(args, &(&1 == "--full"))
+
+    id =
+      case args do
+        [id] -> id
+        _ -> fail("usage: subagent-supervisor show JOB_ID [--full]")
+      end
+
+    {id, full?}
+  end
+
+  defp status_cmd(args) do
+    if "--summarize" in args do
+      fail("--summarize is not yet implemented")
+    end
+
+    args = Enum.reject(args, &(&1 == "--summarize"))
+
+    id =
+      case args do
+        [id] -> id
+        _ -> fail("usage: subagent-supervisor status JOB_ID [--summarize]")
+      end
+
+    rpc!(SubagentSupervisor.Registry, :status, [id])
+    |> print_result()
+  end
 
   defp tail_cmd(args) do
     {id, follow?, verbose?} = parse_tail_args(args)
@@ -204,8 +237,15 @@ defmodule SubagentSupervisor.CLI do
 
               len
 
-            {text, new_offset} ->
-              if text != "", do: IO.write(text)
+            {tagged_lines, new_offset} when is_list(tagged_lines) ->
+              for {text, color} <- tagged_lines, text != "" do
+                if color == :red do
+                  IO.write([IO.ANSI.red(), text, IO.ANSI.reset()])
+                else
+                  IO.write(text)
+                end
+              end
+
               new_offset
           end
 
@@ -431,30 +471,36 @@ defmodule SubagentSupervisor.CLI do
 
     bin = resolve_self_binary()
     max_concurrency = Application.get_env(:subagent_supervisor, :max_concurrency, 2)
+    log_path = Path.join([System.tmp_dir!(), "subagent_supervisor", "daemon.log"])
+    File.mkdir_p!(Path.dirname(log_path))
 
     Port.open(
       {:spawn_executable, System.find_executable("bash")},
       [
         :binary,
         :use_stdio,
-        {:args, ["-c", "(#{bin} server --max-concurrency #{max_concurrency}) &"]}
+        {:args,
+         [
+           "-c",
+           "(#{shell_quote(bin)} server --max-concurrency #{max_concurrency} </dev/null >> #{shell_quote(log_path)} 2>&1) &"
+         ]}
       ]
     )
   end
 
   defp resolve_self_binary do
-    case :escript.script_name() do
-      ~c"" ->
-        case System.fetch_env("SUBAGENT_SUPERVISOR_BIN") do
-          {:ok, path} ->
-            path
+    case System.fetch_env("SUBAGENT_SUPERVISOR_BIN") do
+      {:ok, path} ->
+        path
 
-          :error ->
+      :error ->
+        case :escript.script_name() do
+          ~c"" ->
             fail("cannot auto-start daemon: set SUBAGENT_SUPERVISOR_BIN or install the release")
-        end
 
-      name ->
-        name |> to_string() |> Path.expand()
+          name ->
+            name |> to_string() |> Path.expand()
+        end
     end
   end
 
@@ -588,7 +634,8 @@ defmodule SubagentSupervisor.CLI do
     subagent-supervisor start --owner OWNER|--session SESSION [--label LABEL] [--cwd DIR] -- PROMPT
     subagent-supervisor wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
     subagent-supervisor list [--owner OWNER|--session SESSION]
-    subagent-supervisor show JOB_ID
+    subagent-supervisor show JOB_ID [--full]
+    subagent-supervisor status JOB_ID [--summarize]
     subagent-supervisor tail JOB_ID [--follow|-f] [--verbose]
     subagent-supervisor top
     """)

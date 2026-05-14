@@ -110,9 +110,9 @@ defmodule SubagentSupervisor.StreamJSON do
   Used by `tail --follow` to render human-readable output incrementally.
   """
   @spec format_incremental(String.t(), non_neg_integer()) ::
-          {String.t(), non_neg_integer()}
+          {[{String.t(), atom() | nil}], non_neg_integer()}
   def format_incremental(content, prev_offset) when is_binary(content) do
-    do_format_incremental(content, prev_offset, &Event.format/1, "")
+    do_format_incremental(content, prev_offset, &Event.format/1, true)
   end
 
   @doc """
@@ -120,16 +120,16 @@ defmodule SubagentSupervisor.StreamJSON do
   `Event.format_verbose/1` per line instead of `Event.format/1`.
   """
   @spec format_verbose_incremental(String.t(), non_neg_integer()) ::
-          {String.t(), non_neg_integer()}
+          {[{String.t(), atom() | nil}], non_neg_integer()}
   def format_verbose_incremental(content, prev_offset) when is_binary(content) do
-    do_format_incremental(content, prev_offset, &Event.format_verbose/1, "\n")
+    do_format_incremental(content, prev_offset, &Event.format_verbose/1, false)
   end
 
-  defp do_format_incremental(content, prev_offset, formatter, joiner) do
+  defp do_format_incremental(content, prev_offset, formatter, merge?) do
     len = byte_size(content)
 
     if len <= prev_offset do
-      {"", prev_offset}
+      {[], prev_offset}
     else
       new_bytes = binary_part(content, prev_offset, len - prev_offset)
       parts = String.split(new_bytes, "\n")
@@ -147,15 +147,31 @@ defmodule SubagentSupervisor.StreamJSON do
             end
         end
 
-      text =
+      tagged_raw =
         complete_lines
         |> Enum.map(formatter)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.join(joiner)
+        |> Enum.map(&to_tagged/1)
+        |> Enum.reject(fn {t, _} -> t == "" end)
+
+      tagged = if merge?, do: merge_consecutive(tagged_raw), else: tagged_raw
 
       new_offset = len - byte_size(incomplete)
-      {text, new_offset}
+      {tagged, new_offset}
     end
+  end
+
+  defp to_tagged({text, color}), do: {text, color}
+  defp to_tagged(text) when is_binary(text), do: {text, nil}
+
+  defp merge_consecutive(tagged) do
+    tagged
+    |> Enum.reduce([], fn {text, color}, acc ->
+      case acc do
+        [{prev, ^color} | rest] -> [{prev <> text, color} | rest]
+        _ -> [{text, color} | acc]
+      end
+    end)
+    |> Enum.reverse()
   end
 
   defp decodable?(line) do
@@ -172,10 +188,18 @@ defmodule SubagentSupervisor.StreamJSON.Event do
   def format(line) do
     case Jason.decode(line) do
       {:ok, %{"type" => "stream_event", "event" => event}} ->
-        format_stream_event(event)
+        {format_stream_event(event), nil}
+
+      {:ok, %{"type" => "assistant", "message" => %{"content" => content}}}
+      when is_list(content) ->
+        {format_assistant_tools(content), nil}
+
+      {:ok, %{"type" => "user", "message" => %{"content" => content}}}
+      when is_list(content) ->
+        format_user_errors(content)
 
       _ ->
-        ""
+        {"", nil}
     end
   end
 
@@ -197,6 +221,61 @@ defmodule SubagentSupervisor.StreamJSON.Event do
   end
 
   defp format_stream_event(_), do: ""
+
+  defp format_assistant_tools(content) do
+    content
+    |> Enum.filter(&(&1["type"] == "tool_use"))
+    |> Enum.map(&format_tool_with_input/1)
+    |> Enum.join("\n")
+  end
+
+  defp format_tool_with_input(%{"name" => name, "input" => input}) do
+    detail =
+      case {name, input} do
+        {"Bash", %{"command" => cmd}} -> " $ #{cmd}"
+        {"Edit", %{"file_path" => p}} -> " #{p}"
+        {"Read", %{"file_path" => p}} -> " #{p}"
+        {"Write", %{"file_path" => p}} -> " #{p}"
+        {_, m} when map_size(m) > 0 -> " #{Jason.encode!(m)}"
+        _ -> ""
+      end
+
+    "[Tool: #{name}]#{detail}"
+  end
+
+  defp format_user_errors(content) do
+    errors =
+      Enum.filter(content, fn
+        %{"type" => "tool_result", "is_error" => true} -> true
+        _ -> false
+      end)
+
+    case errors do
+      [] ->
+        {"", nil}
+
+      _ ->
+        text =
+          errors
+          |> Enum.map(&extract_tool_result_text/1)
+          |> Enum.join("\n")
+
+        {text, :red}
+    end
+  end
+
+  defp extract_tool_result_text(%{"content" => inner}) when is_binary(inner), do: inner
+
+  defp extract_tool_result_text(%{"content" => blocks}) when is_list(blocks) do
+    blocks
+    |> Enum.flat_map(fn
+      %{"type" => "text", "text" => t} -> [t]
+      _ -> []
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp extract_tool_result_text(_), do: ""
 
   @doc """
   Verbose-mode formatter. Applies the whitelist to produce a readable
