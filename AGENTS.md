@@ -67,7 +67,8 @@ subagent-supervisor session [--prefix PREFIX]
 subagent-supervisor start --owner ID|--session ID [--label L] [--cwd DIR] -- PROMPT
 subagent-supervisor wait  --owner ID|--session ID [--ids A,B] [--mode any|all] [--timeout SEC]
 subagent-supervisor list  [--owner ID|--session ID]
-subagent-supervisor show  JOB_ID
+subagent-supervisor show  JOB_ID [--full]
+subagent-supervisor status JOB_ID [--summarize]
 subagent-supervisor tail  JOB_ID [--follow|-f]
 subagent-supervisor top
 ```

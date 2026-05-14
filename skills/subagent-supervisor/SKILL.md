@@ -32,6 +32,34 @@ subagent-supervisor start --session "$SUBAGENT_SUPERVISOR_SESSION" --label "api-
 
 The command prints JSON containing `id`, `status`, `owner`, `label`, and timestamps. Preserve returned ids when the wake rule applies only to a subset of jobs.
 
+## Default Sandbox Profile
+
+Prefer a sandbox profile that allows repository edits, the agent's dynamic temp directory, and Claude shell session setup, while keeping git internals and agent configuration protected.
+
+For Claude Code subagents on macOS, Bash tool calls must set `dangerouslyDisableSandbox: true`. The parent process is already sandboxed, and nested `sandbox-exec` initialization can fail before even read-only commands such as `pwd` run.
+
+Do not hardcode observed temp paths; resolve the effective temp root from `$TMPDIR`, `System.tmp_dir!()`, or `mktemp -d` for the current job.
+
+```yaml
+sandbox:
+  dangerouslyDisableSandbox: true
+write:
+  allowOnly:
+    - "."
+    - "$TMPDIR"
+    - "$HOME/.claude/session-env/"
+    - "$HOME/.claude/debug"
+  denyWithinAllow:
+    - "*/.claude/settings*.json"
+    - "*/.claude/skills"
+    - "*/HEAD"
+    - "*/objects"
+    - "*/refs"
+    - "*/hooks"
+```
+
+Claude's effective config dir must have a writable `session-env/` directory; when launching subagents, prefer setting `CLAUDE_CONFIG_DIR` under `$TMPDIR` instead of requiring broad writes to `$HOME/.claude`.
+
 ## Wake Rules
 
 Use `wait` to block until the daemon can return completed results:
@@ -57,7 +85,19 @@ subagent-supervisor list --session "$SUBAGENT_SUPERVISOR_SESSION"
 Fetch one job, including captured output:
 
 ```bash
-subagent-supervisor show job_a
+subagent-supervisor show job_a --full
+```
+
+Get a lightweight status digest (metadata + truncated output) without the full raw output:
+
+```bash
+subagent-supervisor status job_a
+```
+
+Inspect streamed output with the parsed default tail. Use `--verbose` only when debugging raw stream-json events, parser behavior, or missing output:
+
+```bash
+subagent-supervisor tail job_a
 ```
 
 Open the global dashboard:

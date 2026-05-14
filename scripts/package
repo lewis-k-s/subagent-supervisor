@@ -16,7 +16,17 @@ cat > "$WRAPPER" <<'SH'
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE=$0
+while [ -L "$SOURCE" ]; do
+  SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)
+  TARGET=$(readlink "$SOURCE")
+  case "$TARGET" in
+    /*) SOURCE=$TARGET ;;
+    *) SOURCE=$SOURCE_DIR/$TARGET ;;
+  esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)
 RELEASE_BIN="$SCRIPT_DIR/../libexec/subagent_supervisor/bin/subagent_supervisor"
 
 export SUBAGENT_SUPERVISOR_BIN="$SCRIPT_DIR/subagent-supervisor"
