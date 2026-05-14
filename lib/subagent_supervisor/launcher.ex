@@ -13,8 +13,8 @@ defmodule SubagentSupervisor.Launcher do
   """
   @spec resolve() :: {:ok, String.t()} | :error
   def resolve do
-    with {:error, _} <- resolve_from_escript_dir(),
-         {:error, _} <- resolve_from_system_path() do
+    with :error <- resolve_from_escript_dir(),
+         :error <- resolve_from_system_path() do
       :error
     else
       {:ok, path} -> {:ok, path}
