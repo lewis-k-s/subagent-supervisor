@@ -1,0 +1,303 @@
+defmodule SubagentSupervisor.Top.Model do
+  @moduledoc false
+
+  import Ratatouille.Constants, only: [key: 1, event_type: 1]
+
+  alias Ratatouille.Runtime.Subscription
+
+  @key_esc key(:esc)
+  @key_enter key(:enter)
+  @key_arrow_up key(:arrow_up)
+  @key_arrow_down key(:arrow_down)
+  @key_page_up key(:pgup)
+  @key_page_down key(:pgdn)
+  @key_home key(:home)
+  @key_end key(:end)
+  @event_resize event_type(:resize)
+
+  @output_buffer 100
+
+  alias SubagentSupervisor.Top
+
+  def init(%{daemon: daemon, window: %{height: height, width: width}}) do
+    model = %Top{daemon: daemon, window_height: height, window_width: width}
+    fetch_state(model)
+  end
+
+  def init(%{daemon: daemon}) do
+    model = %Top{daemon: daemon}
+    fetch_state(model)
+  end
+
+  def init(%{window: %{height: height, width: width}}) do
+    daemon = Application.fetch_env!(:subagent_supervisor, :top_daemon)
+    model = %Top{daemon: daemon, window_height: height, window_width: width}
+    fetch_state(model)
+  end
+
+  def subscribe(_model) do
+    Subscription.interval(250, :tick)
+  end
+
+  def update(model, msg) do
+    case msg do
+      :tick ->
+        model =
+          if model.view_mode == :output and model.selected_job_id do
+            model
+          else
+            fetch_state(model)
+          end
+
+        if model.view_mode == :output and model.selected_job_id do
+          fetch_output(model)
+        else
+          model
+        end
+
+      {:event, %{ch: ?q}} ->
+        if model.view_mode == :dashboard do
+          System.halt(0)
+        else
+          model
+        end
+
+      {:event, %{ch: ?r}} ->
+        if model.view_mode == :output do
+          %{
+            model
+            | output_verbose: not model.output_verbose,
+              output_byte_offset: 0,
+              selected_job_output: ""
+          }
+        else
+          model
+        end
+
+      {:event, %{key: @key_esc}} ->
+        if model.view_mode == :output do
+          %{
+            model
+            | view_mode: :dashboard,
+              selected_job_id: nil,
+              selected_job_output: "",
+              output_verbose: false,
+              output_scroll: 0,
+              output_byte_offset: 0
+          }
+        else
+          model
+        end
+
+      {:event, %{key: @key_enter}} ->
+        if model.view_mode == :dashboard and model.total_jobs > 0 do
+          job = Enum.at(model.all_jobs, model.selected_index)
+
+          if job do
+            model = %{
+              model
+              | view_mode: :output,
+                selected_job_id: job.id,
+                output_scroll: 0,
+                output_auto_scroll: true,
+                output_byte_offset: 0,
+                selected_job_output: ""
+            }
+
+            fetch_output(model)
+          else
+            model
+          end
+        else
+          model
+        end
+
+      {:event, %{key: @key_arrow_up}} ->
+        handle_arrow_up(model)
+
+      {:event, %{key: @key_arrow_down}} ->
+        handle_arrow_down(model)
+
+      {:event, %{key: @key_page_up}} ->
+        handle_page_up(model)
+
+      {:event, %{key: @key_page_down}} ->
+        handle_page_down(model)
+
+      {:event, %{key: @key_home}} ->
+        handle_home(model)
+
+      {:event, %{key: @key_end}} ->
+        handle_end(model)
+
+      {:event, %{type: @event_resize, h: h}} ->
+        %{model | window_height: h}
+
+      _ ->
+        model
+    end
+  end
+
+  defp handle_arrow_up(%{view_mode: :dashboard} = model) do
+    %{model | selected_index: max(model.selected_index - 1, 0)}
+  end
+
+  defp handle_arrow_up(%{view_mode: :output} = model) do
+    %{model | output_scroll: max(model.output_scroll - 1, 0), output_auto_scroll: false}
+  end
+
+  defp handle_arrow_down(%{view_mode: :dashboard} = model) do
+    max_idx = max(model.total_jobs - 1, 0)
+    %{model | selected_index: min(model.selected_index + 1, max_idx)}
+  end
+
+  defp handle_arrow_down(%{view_mode: :output} = model) do
+    %{model | output_scroll: model.output_scroll + 1, output_auto_scroll: false}
+  end
+
+  defp handle_page_up(%{view_mode: :output} = model) do
+    page = output_visible_lines(model)
+    %{model | output_scroll: max(model.output_scroll - page, 0), output_auto_scroll: false}
+  end
+
+  defp handle_page_up(%{view_mode: :dashboard} = model) do
+    page = dashboard_visible_jobs(model)
+    %{model | selected_index: max(model.selected_index - page, 0)}
+  end
+
+  defp handle_page_down(%{view_mode: :output} = model) do
+    page = output_visible_lines(model)
+    %{model | output_scroll: model.output_scroll + page, output_auto_scroll: false}
+  end
+
+  defp handle_page_down(%{view_mode: :dashboard} = model) do
+    page = dashboard_visible_jobs(model)
+    max_idx = max(model.total_jobs - 1, 0)
+    %{model | selected_index: min(model.selected_index + page, max_idx)}
+  end
+
+  defp handle_home(%{view_mode: :output} = model) do
+    %{model | output_scroll: 0, output_auto_scroll: false}
+  end
+
+  defp handle_home(%{view_mode: :dashboard} = model) do
+    %{model | selected_index: 0}
+  end
+
+  defp handle_end(%{view_mode: :output} = model) do
+    %{model | output_auto_scroll: true}
+  end
+
+  defp handle_end(%{view_mode: :dashboard} = model) do
+    %{model | selected_index: max(model.total_jobs - 1, 0)}
+  end
+
+  defp fetch_state(%Top{} = model) do
+    case :rpc.call(model.daemon, SubagentSupervisor.Registry, :dashboard_state, []) do
+      {:ok, data} ->
+        all_jobs =
+          data.jobs_by_owner
+          |> Enum.flat_map(& &1.jobs)
+
+        %Top{
+          model
+          | started_at: data.started_at,
+            jobs_by_owner: data.jobs_by_owner,
+            all_jobs: all_jobs,
+            total_jobs: data.total_jobs,
+            running: data.running,
+            queued: data.queued,
+            max_concurrency: data.max_concurrency,
+            supervision_tree: data.supervision_tree,
+            error: nil
+        }
+
+      {:badrpc, reason} ->
+        %{model | error: "daemon unreachable: #{inspect(reason)}"}
+    end
+  end
+
+  defp fetch_output(%Top{} = model) do
+    case :rpc.call(model.daemon, SubagentSupervisor.Registry, :read_output, [
+           model.selected_job_id
+         ]) do
+      {:ok, raw_content} ->
+        format_fn =
+          if model.output_verbose do
+            :format_verbose_incremental
+          else
+            :format_incremental
+          end
+
+        {new_text, new_offset} =
+          :rpc.call(
+            model.daemon,
+            SubagentSupervisor.StreamJSON,
+            format_fn,
+            [raw_content, model.output_byte_offset]
+          )
+
+        appended_output = model.selected_job_output <> new_text
+
+        {trimmed_output, scroll_adj} = trim_output(appended_output, model)
+
+        scroll =
+          if model.output_auto_scroll do
+            line_count = trimmed_output |> String.split("\n") |> length()
+            visible = output_visible_lines(model)
+            max(0, line_count - visible)
+          else
+            max(model.output_scroll - scroll_adj, 0)
+          end
+
+        %{
+          model
+          | selected_job_output: trimmed_output,
+            output_scroll: scroll,
+            output_byte_offset: new_offset
+        }
+
+      _ ->
+        model
+    end
+  end
+
+  defp trim_output(output, model) do
+    visible = output_visible_lines(model)
+    max_lines = visible + @output_buffer
+    lines = String.split(output, "\n")
+
+    if length(lines) > max_lines do
+      kept = Enum.take(lines, -max_lines)
+      trimmed_count = length(lines) - max_lines
+      {Enum.join(kept, "\n"), trimmed_count}
+    else
+      {output, 0}
+    end
+  end
+
+  defp output_visible_lines(model) do
+    default = 24
+    height = model.window_height || default
+    max(height - 6, 1)
+  end
+
+  defp dashboard_visible_jobs(model) do
+    default = 24
+    height = model.window_height || default
+    max(height - sup_panel_height(model) - 6, 3)
+  end
+
+  defp sup_panel_height(model) do
+    tree_size = count_tree_nodes(model.supervision_tree)
+    default_height = model.window_height || 24
+    max_allowed = max(default_height - 8, 8)
+    min(max(tree_size + 4, 6), min(12, max_allowed))
+  end
+
+  defp count_tree_nodes(tree) do
+    Enum.reduce(tree, 0, fn node, acc ->
+      acc + 1 + count_tree_nodes(Map.get(node, :children, []))
+    end)
+  end
+end

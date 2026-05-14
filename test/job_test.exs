@@ -1,9 +1,9 @@
-defmodule CodexSubagents.JobTest do
+defmodule SubagentSupervisor.JobTest do
   use ExUnit.Case, async: true
 
   test "enforcing required keys raises without :id" do
     assert_raise ArgumentError, fn ->
-      struct!(CodexSubagents.Job, %{
+      struct!(SubagentSupervisor.Job, %{
         owner: "test",
         command: "echo hi",
         cwd: "/tmp",
@@ -14,7 +14,7 @@ defmodule CodexSubagents.JobTest do
   end
 
   test "optional fields default to nil" do
-    job = %CodexSubagents.Job{
+    job = %SubagentSupervisor.Job{
       id: "test-id",
       owner: "test",
       command: "echo hi",

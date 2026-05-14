@@ -1,18 +1,18 @@
-defmodule CodexSubagents.TopTest do
+defmodule SubagentSupervisor.TopTest do
   use ExUnit.Case
 
   import Ratatouille.Constants, only: [key: 1]
 
-  alias CodexSubagents.Top
+  alias SubagentSupervisor.Top
   alias Ratatouille.Renderer
   alias Ratatouille.Renderer.Canvas
 
   describe "init/1" do
     test "initializes from Ratatouille window context using configured daemon" do
-      Application.put_env(:codex_subagents, :top_daemon, :configured_daemon)
+      Application.put_env(:subagent_supervisor, :top_daemon, :configured_daemon)
 
       on_exit(fn ->
-        Application.delete_env(:codex_subagents, :top_daemon)
+        Application.delete_env(:subagent_supervisor, :top_daemon)
       end)
 
       model = Top.init(%{window: %{width: 93, height: 44}})
@@ -198,6 +198,7 @@ defmodule CodexSubagents.TopTest do
         view_mode: :output,
         selected_job_id: "job_123",
         selected_job_output: "some output",
+        output_verbose: true,
         output_scroll: 5
       }
 
@@ -205,6 +206,7 @@ defmodule CodexSubagents.TopTest do
       assert updated.view_mode == :dashboard
       assert updated.selected_job_id == nil
       assert updated.selected_job_output == ""
+      assert updated.output_verbose == false
       assert updated.output_scroll == 0
     end
 
@@ -250,6 +252,21 @@ defmodule CodexSubagents.TopTest do
       updated = Top.update(model, {:event, %{ch: ?q}})
       assert updated.view_mode == :output
     end
+
+    test "r toggles verbose mode in output view" do
+      model = %Top{daemon: :ignored, view_mode: :output, output_verbose: false}
+      updated = Top.update(model, {:event, %{ch: ?r}})
+      assert updated.output_verbose == true
+
+      updated2 = Top.update(updated, {:event, %{ch: ?r}})
+      assert updated2.output_verbose == false
+    end
+
+    test "r does nothing in dashboard mode" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard, output_verbose: false}
+      updated = Top.update(model, {:event, %{ch: ?r}})
+      assert updated.output_verbose == false
+    end
   end
 
   describe "update/2 - enter to view output" do
@@ -290,11 +307,11 @@ defmodule CodexSubagents.TopTest do
         daemon: :ignored,
         supervision_tree: [
           %{
-            name: "CodexSubagents.Supervisor",
+            name: "SubagentSupervisor.Supervisor",
             type: :supervisor,
             children: [
               %{
-                name: "CodexSubagents.Registry",
+                name: "SubagentSupervisor.Registry",
                 pid: "#PID<0.97.0>",
                 type: :worker,
                 children: []
@@ -307,7 +324,7 @@ defmodule CodexSubagents.TopTest do
       assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
 
       output = Canvas.render_to_string(canvas)
-      assert output =~ "CodexSubagents.Supervisor"
+      assert output =~ "SubagentSupervisor.Supervisor"
       assert output =~ "(not started)"
     end
 

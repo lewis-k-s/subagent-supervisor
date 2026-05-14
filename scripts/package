@@ -2,10 +2,10 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-INSTALL_DIR=${1:-"$ROOT/dist/codex-subagents"}
-RELEASE_DIR="$INSTALL_DIR/libexec/codex_subagents"
+INSTALL_DIR=${1:-"$HOME/.local/subagent-supervisor"}
+RELEASE_DIR="$INSTALL_DIR/libexec/subagent_supervisor"
 WRAPPER_DIR="$INSTALL_DIR/bin"
-WRAPPER="$WRAPPER_DIR/codex-subagents"
+WRAPPER="$WRAPPER_DIR/subagent-supervisor"
 
 cd "$ROOT"
 MIX_ENV=prod mix release --overwrite --path "$RELEASE_DIR"
@@ -17,12 +17,24 @@ cat > "$WRAPPER" <<'SH'
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-RELEASE_BIN="$SCRIPT_DIR/../libexec/codex_subagents/bin/codex_subagents"
+RELEASE_BIN="$SCRIPT_DIR/../libexec/subagent_supervisor/bin/subagent_supervisor"
 
-exec "$RELEASE_BIN" eval 'CodexSubagents.CLI.main(System.argv())' "$@"
+export SUBAGENT_SUPERVISOR_BIN="$SCRIPT_DIR/subagent-supervisor"
+
+exec "$RELEASE_BIN" eval 'SubagentSupervisor.CLI.main(System.argv())' "$@"
 SH
 
 chmod +x "$WRAPPER"
 
-printf 'Packaged codex-subagents at %s\n' "$INSTALL_DIR"
+cp "$ROOT/scripts/claude-subagent" "$WRAPPER_DIR/claude-subagent"
+chmod +x "$WRAPPER_DIR/claude-subagent"
+
+LINK_DIR="$HOME/.local/bin"
+if [ -d "$LINK_DIR" ] && [ "$WRAPPER_DIR" != "$LINK_DIR" ]; then
+  ln -sf "$WRAPPER" "$LINK_DIR/subagent-supervisor"
+  ln -sf "$WRAPPER_DIR/claude-subagent" "$LINK_DIR/claude-subagent"
+  printf 'Symlinked to %s\n' "$LINK_DIR"
+fi
+
+printf 'Packaged subagent-supervisor at %s\n' "$INSTALL_DIR"
 printf 'Add %s to PATH\n' "$WRAPPER_DIR"

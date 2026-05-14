@@ -1,11 +1,12 @@
-defmodule CodexSubagents.Registry do
+defmodule SubagentSupervisor.Registry do
   @moduledoc """
   Owns job state and supervises bash subprocess tasks.
   """
 
   use GenServer
 
-  alias CodexSubagents.Job
+  alias SubagentSupervisor.Job
+  alias SubagentSupervisor.StreamJSON
 
   @type wait_mode :: :any | :all
 
@@ -80,6 +81,21 @@ defmodule CodexSubagents.Registry do
   end
 
   @doc """
+  Reads the stream-json capture for a job, formatting it according to `mode`.
+
+  Modes:
+    * `:parsed`  — text deltas + tool labels (default, concise)
+    * `:verbose` — assembled snapshots with thinking, tool I/O, cost metadata
+
+  Returns `{:ok, text}`, `{:error, :not_found}`, or `{:error, :no_output}`.
+  """
+  @spec read_stream_output(String.t(), :parsed | :verbose) ::
+          {:ok, String.t()} | {:error, :not_found | :no_output}
+  def read_stream_output(id, mode \\ :parsed) do
+    GenServer.call(__MODULE__, {:read_stream_output, id, mode})
+  end
+
+  @doc """
   Blocks until the selected wake rule is satisfied.
 
   * `:any` — returns when at least one matching job finishes.
@@ -97,7 +113,7 @@ defmodule CodexSubagents.Registry do
 
   @impl true
   def init(_opts) do
-    output_dir = Path.join(System.tmp_dir!(), "codex_subagents")
+    output_dir = Path.join(System.tmp_dir!(), "subagent_supervisor")
     File.mkdir_p!(output_dir)
 
     {:ok,
@@ -107,7 +123,8 @@ defmodule CodexSubagents.Registry do
        waiters: [],
        max_concurrency: max_concurrency(),
        started_at: DateTime.utc_now(),
-       output_dir: output_dir
+       output_dir: output_dir,
+       allowed_launchers: resolve_allowed_launchers()
      }}
   end
 
@@ -115,6 +132,7 @@ defmodule CodexSubagents.Registry do
   def handle_call({:start_job, attrs}, _from, state) do
     owner = required!(attrs, "owner")
     command = required!(attrs, "command")
+    validate_command!(command, state.allowed_launchers)
     cwd = Map.get(attrs, "cwd", File.cwd!())
     label = Map.get(attrs, "label")
     id = Map.get(attrs, "id", new_id())
@@ -182,7 +200,7 @@ defmodule CodexSubagents.Registry do
     queued = Enum.count(jobs, &(&1.status == :queued))
 
     {:ok, sup_children} =
-      case Supervisor.which_children(CodexSubagents.Supervisor) do
+      case Supervisor.which_children(SubagentSupervisor.Supervisor) do
         children -> {:ok, format_sup_children(children)}
       end
 
@@ -195,7 +213,7 @@ defmodule CodexSubagents.Registry do
       started_at: state.started_at,
       supervision_tree: [
         %{
-          name: "CodexSubagents.Supervisor",
+          name: "SubagentSupervisor.Supervisor",
           type: :supervisor,
           children: sup_children
         }
@@ -240,18 +258,48 @@ defmodule CodexSubagents.Registry do
     {:reply, reply, state}
   end
 
+  def handle_call({:read_stream_output, id, mode}, _from, state) do
+    reply =
+      case Map.fetch(state.jobs, id) do
+        {:ok, %Job{output_path: nil}} ->
+          {:error, :no_output}
+
+        {:ok, %Job{output_path: path}} ->
+          if File.exists?(path) do
+            raw = File.read!(path)
+
+            text =
+              case mode do
+                :verbose -> StreamJSON.extract_verbose(raw)
+                _ -> StreamJSON.format_incremental(raw, 0) |> elem(0)
+              end
+
+            {:ok, text}
+          else
+            {:error, :no_output}
+          end
+
+        :error ->
+          {:error, :not_found}
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info({ref, {id, started_at, finished_at, exit_status}}, state) do
     Process.demonitor(ref, [:flush])
 
     state =
       update_job(state, id, fn job ->
-        output =
+        raw =
           if job.output_path && File.exists?(job.output_path) do
             File.read!(job.output_path)
           else
             ""
           end
+
+        output = StreamJSON.extract_text(raw)
 
         %{
           job
@@ -274,12 +322,15 @@ defmodule CodexSubagents.Registry do
     state =
       if id do
         update_job(state, id, fn job ->
-          partial =
+          raw =
             if job.output_path && File.exists?(job.output_path) do
-              "\n" <> File.read!(job.output_path)
+              File.read!(job.output_path)
             else
               ""
             end
+
+          parsed = StreamJSON.extract_text(raw)
+          partial = if raw != parsed, do: "\n" <> parsed, else: parsed
 
           %{
             job
@@ -337,7 +388,7 @@ defmodule CodexSubagents.Registry do
     command = job.command
 
     task =
-      Task.Supervisor.async_nolink(CodexSubagents.TaskSupervisor, fn ->
+      Task.Supervisor.async_nolink(SubagentSupervisor.TaskSupervisor, fn ->
         port =
           Port.open(
             {:spawn_executable, System.find_executable("bash")},
@@ -486,7 +537,7 @@ defmodule CodexSubagents.Registry do
   defp now, do: DateTime.utc_now()
 
   defp max_concurrency do
-    :codex_subagents
+    :subagent_supervisor
     |> Application.get_env(:max_concurrency, 2)
     |> max(1)
   end
@@ -502,7 +553,7 @@ defmodule CodexSubagents.Registry do
     end)
   end
 
-  defp child_grandchildren(:codex_subagents_task_supervisor, pid) when is_pid(pid) do
+  defp child_grandchildren(:subagent_supervisor_task_supervisor, pid) when is_pid(pid) do
     case Task.Supervisor.children(pid) do
       pids ->
         Enum.map(
@@ -517,4 +568,28 @@ defmodule CodexSubagents.Registry do
   defp format_pid(nil), do: "not started"
   defp format_pid(:restarting), do: "restarting"
   defp format_pid(pid) when is_pid(pid), do: inspect(pid)
+
+  defp resolve_allowed_launchers do
+    SubagentSupervisor.Launcher.allowed_launchers()
+  end
+
+  defp validate_command!(command, allowed_launchers) do
+    unless Enum.any?(allowed_launchers, fn launcher ->
+             command == launcher or
+               String.starts_with?(command, launcher <> " ") or
+               command == shell_quote_launcher(launcher) or
+               String.starts_with?(command, shell_quote_launcher(launcher) <> " ")
+           end) do
+      raise ArgumentError,
+            "command rejected: must use an allowed launcher (#{inspect(allowed_launchers)}), got: #{command}"
+    end
+  end
+
+  defp shell_quote_launcher(launcher) do
+    if String.match?(launcher, ~r/^[A-Za-z0-9_\/.,:=@%+-]+$/) do
+      launcher
+    else
+      "'" <> String.replace(launcher, "'", "'\"'\"'") <> "'"
+    end
+  end
 end

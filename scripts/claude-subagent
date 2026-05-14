@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+budget="${CLAUDE_SUBAGENT_BUDGET:-2.0}"
+
+exec claude -p \
+  --permission-mode auto \
+  --disallowedTools \
+    "Bash(rm:*) Bash(rm -rf:*) Bash(sudo:*) Bash(git push --force:*) Bash(git reset --hard:*)" \
+  --max-budget-usd "$budget" \
+  --output-format stream-json \
+  --include-partial-messages \
+  --verbose \
+  --no-session-persistence \
+  "$@"

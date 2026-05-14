@@ -1,6 +1,6 @@
-# codex-subagents
+# subagent-supervisor
 
-An Elixir CLI/release that runs as a host-global background daemon and lets Codex (or any orchestrator) dispatch bash subprocess jobs with bounded concurrency, `any`/`all` wait semantics, captured output, and a live `top` dashboard.
+An Elixir CLI/release that runs as a host-global background daemon and lets any orchestrator dispatch bash subprocess jobs with bounded concurrency, `any`/`all` wait semantics, captured output, and a live `top` dashboard.
 
 ## Architecture
 
@@ -13,12 +13,13 @@ An Elixir CLI/release that runs as a host-global background daemon and lets Code
 └─────────────┘                          └──────────────────────────┘
 ```
 
-The daemon is a supervised OTP application. The CLI connects via Erlang distribution (short names) and issues RPC calls. The daemon node name is `codex_subagents@<host>`, so one server is shared by all active Codex sessions on the same host, regardless of their current repository. All communication uses a custom zero-dep JSON encoder.
+The daemon is a supervised OTP application. The CLI connects via Erlang distribution (short names) and issues RPC calls. The daemon node name is `subagent_supervisor@<host>`, so one server is shared by all active sessions on the same host, regardless of their current repository. All communication uses a custom zero-dep JSON encoder.
+
+The daemon auto-starts on first use — any CLI command will spawn it in the background if it is not already running.
 
 ## Prerequisites
 
 - Elixir >= 1.15 (no external dependencies)
-- EPMD running (`epmd -daemon`)
 
 ## Build & Install
 
@@ -26,7 +27,7 @@ The daemon is a supervised OTP application. The CLI connects via Erlang distribu
 mix escript.build
 ```
 
-This produces a development escript at `./codex-subagents`.
+This produces a development escript at `./subagent-supervisor`.
 
 For an installable tool that can be run from any repository and supports the `top` dashboard, build the release package:
 
@@ -34,34 +35,32 @@ For an installable tool that can be run from any repository and supports the `to
 scripts/package
 ```
 
-This writes a contained package to `dist/codex-subagents` by default. Add `dist/codex-subagents/bin` to `PATH`, or pass a target directory:
+This installs to `~/.local/subagent-supervisor` and symlinks the wrapper to `~/.local/bin` if it exists. Add `~/.local/subagent-supervisor/bin` to `PATH`, or ensure `~/.local/bin` is on your PATH.
 
-```bash
-scripts/package ~/.local/codex-subagents
-```
-
-The release package includes the native `ex_termbox` NIF on disk, which is required for `codex-subagents top`. Escripts cannot load that NIF from inside the escript archive, so the development escript falls back to `mix run` when it lives beside this source checkout.
+The release package includes the native `ex_termbox` NIF on disk, which is required for `subagent-supervisor top`. Escripts cannot load that NIF from inside the escript archive, so the development escript falls back to `mix run` when it lives beside this source checkout.
 
 ## Commands
 
 ### Start the daemon
 
 ```bash
-codex-subagents server --max-concurrency 2
+subagent-supervisor server --max-concurrency 4
 ```
 
-Starts the host-global daemon process. `--max-concurrency` sets how many bash jobs run simultaneously across all connected Codex sessions; extra jobs queue in FIFO order. Defaults to `2`, minimum `1`.
+Starts the host-global daemon process. `--max-concurrency` sets how many bash jobs run simultaneously across all connected sessions; extra jobs queue in FIFO order. Defaults to `4`, minimum `1`.
+
+The daemon also auto-starts when any other command is run. Manual `server` is only needed to set custom flags or run in the foreground.
 
 ### Stop the daemon
 
 ```bash
-codex-subagents stop
+subagent-supervisor stop
 ```
 
 ### Create a session id
 
 ```bash
-codex-subagents session --prefix my-thread
+subagent-supervisor session --prefix my-thread
 ```
 
 Returns JSON with a short readable `session` id. Reuse this value with `--session` on `start`, `wait`, and `list` to isolate one master agent's jobs from other active sessions on the same global daemon.
@@ -69,7 +68,7 @@ Returns JSON with a short readable `session` id. Reuse this value with `--sessio
 ### Dispatch a job
 
 ```bash
-codex-subagents start --session my-thread-abc123 --label "api-slice" --cwd /tmp -- echo "hello"
+subagent-supervisor start --session my-thread-abc123 --label "api-slice" --cwd /tmp -- "Implement the API slice."
 ```
 
 Required flags:
@@ -81,11 +80,7 @@ Optional flags:
 - `--label` — human-readable label for the job
 - `--cwd` — working directory for the subprocess (defaults to current directory)
 
-The command and its arguments follow `--`. For shell operators, pipes, or redirects, wrap in `bash -lc`:
-
-```bash
-codex-subagents start --session my-thread-abc123 --cwd /tmp -- bash -lc "echo hello && echo world"
-```
+The prompt text follows `--`. The supervisor automatically wraps it in `scripts/claude-subagent`. Only `claude-subagent` is allowed as a launcher — raw bash commands are rejected.
 
 Output is JSON with `id`, `status`, `owner`, `label`, `command`, and timestamps.
 
@@ -93,13 +88,13 @@ Output is JSON with `id`, `status`, `owner`, `label`, `command`, and timestamps.
 
 ```bash
 # Block until ALL jobs for the owner are done
-codex-subagents wait --session my-thread-abc123 --mode all --timeout 3600
+subagent-supervisor wait --session my-thread-abc123 --mode all --timeout 3600
 
 # Return as soon as ANY one job finishes
-codex-subagents wait --session my-thread-abc123 --mode any --timeout 3600
+subagent-supervisor wait --session my-thread-abc123 --mode any --timeout 3600
 
 # Wait for specific jobs by id
-codex-subagents wait --session my-thread-abc123 --ids job_a,job_b --mode all --timeout 3600
+subagent-supervisor wait --session my-thread-abc123 --ids job_a,job_b --mode all --timeout 3600
 ```
 
 - `--mode` — `any` returns when the first matching job finishes; `all` waits for every matching job
@@ -111,16 +106,16 @@ codex-subagents wait --session my-thread-abc123 --ids job_a,job_b --mode all --t
 
 ```bash
 # All jobs
-codex-subagents list
+subagent-supervisor list
 
 # Filtered by owner
-codex-subagents list --session my-thread-abc123
+subagent-supervisor list --session my-thread-abc123
 ```
 
 ### Show a single job
 
 ```bash
-codex-subagents show <JOB_ID>
+subagent-supervisor show <JOB_ID>
 ```
 
 Returns full job details including captured output.
@@ -128,23 +123,23 @@ Returns full job details including captured output.
 ### Dashboard
 
 ```bash
-codex-subagents top
+subagent-supervisor top
 ```
 
-Shows all jobs known to the global daemon, grouped by owner, across every repository and active Codex session on the same host.
+Shows all jobs known to the global daemon, grouped by owner, across every repository and active session on the same host.
 
 ### Help
 
 ```bash
-codex-subagents help
-codex-subagents --help
+subagent-supervisor help
+subagent-supervisor --help
 ```
 
 ## Configuration
 
 | Setting | Flag | Default | Description |
 |---|---|---|---|
-| Max concurrency | `--max-concurrency` | 2 | Simultaneous bash subprocesses |
+| Max concurrency | `--max-concurrency` | 4 | Simultaneous bash subprocesses |
 
 Set when starting the daemon; cannot be changed at runtime.
 
@@ -154,7 +149,7 @@ Set when starting the daemon; cannot be changed at runtime.
 mix test
 ```
 
-Tests use `CodexSubagents.Registry.reset_for_test/1` to isolate state between cases.
+Tests use `SubagentSupervisor.Registry.reset_for_test/1` to isolate state between cases.
 
 ## License
 

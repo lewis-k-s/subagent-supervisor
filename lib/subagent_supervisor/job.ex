@@ -1,4 +1,4 @@
-defmodule CodexSubagents.Job do
+defmodule SubagentSupervisor.Job do
   @moduledoc """
   Immutable job metadata tracked by the daemon.
   """

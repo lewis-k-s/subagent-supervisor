@@ -2,7 +2,7 @@
 /deps/
 /doc/
 /*.ez
-/codex-subagents
+/subagent-supervisor
 /.cache/
 /.elixir_ls/
 /.claude/

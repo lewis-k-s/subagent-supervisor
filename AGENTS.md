@@ -6,10 +6,9 @@ Elixir daemon/CLI for dispatching bash subprocess jobs with concurrency control.
 
 ```bash
 mix deps.get                 # fetch deps (includes ratatouille + ex_termbox)
-mix escript.build            # compiles ./codex-subagents
-scripts/package              # builds installable release in dist/codex-subagents
-epmd -daemon                 # required before any command
-./codex-subagents server     # starts the daemon (blocks)
+mix escript.build            # compiles ./subagent-supervisor
+scripts/package              # builds installable release in ~/.local/subagent-supervisor
+./subagent-supervisor server # starts the daemon (blocks)
 ```
 
 > **Note:** `ex_termbox` (used by ratatouille) requires Python ≤3.11 at build time
@@ -29,7 +28,7 @@ mix format --check-formatted    # style check
 
 ## Architecture
 
-Six modules in `lib/codex_subagents/`:
+Six modules in `lib/subagent_supervisor/`:
 
 | Module | Role |
 |---|---|
@@ -40,7 +39,9 @@ Six modules in `lib/codex_subagents/`:
 | `JSON` | hand-rolled encoder (zero external deps) |
 | `Top` | Ratatouille TUI dashboard — live view of jobs & supervision tree |
 
-Daemon and CLI communicate over distributed Erlang (short names, shared cookie `:codex_subagents`). The daemon node name is host-global (`codex_subagents@<host>`), so one server is shared across active Codex sessions and repositories on the same host. External dependency: `ratatouille` (TUI framework, used only by the `top` command).
+Daemon and CLI communicate over distributed Erlang (short names, shared cookie `:subagent_supervisor`). The daemon node name is host-global (`subagent_supervisor@<host>`), so one server is shared across active sessions and repositories on the same host. External dependency: `ratatouille` (TUI framework, used only by the `top` command).
+
+The daemon auto-starts on first use — any CLI command (`start`, `wait`, `list`, `show`, `tail`, `top`) will spawn the daemon in the background if it is not already running.
 
 ## Code Conventions
 
@@ -53,27 +54,34 @@ Daemon and CLI communicate over distributed Erlang (short names, shared cookie `
 
 ## Testing Pattern
 
-- `CodexSubagents.Registry.reset_for_test/1` in every `setup` block for clean state
+- `SubagentSupervisor.Registry.reset_for_test/1` in every `setup` block for clean state
 - Pass `@tag max_concurrency: N` to override concurrency per test
 - Tests live in `test/` mirroring module names
 
 ## CLI Quick Reference
 
 ```
-codex-subagents server [--max-concurrency N]
-codex-subagents stop
-codex-subagents session [--prefix PREFIX]
-codex-subagents start --owner ID|--session ID [--label L] [--cwd DIR] -- CMD args...
-codex-subagents wait  --owner ID|--session ID [--ids A,B] [--mode any|all] [--timeout SEC]
-codex-subagents list  [--owner ID|--session ID]
-codex-subagents show  JOB_ID
-codex-subagents top
+subagent-supervisor server [--max-concurrency N]
+subagent-supervisor stop
+subagent-supervisor session [--prefix PREFIX]
+subagent-supervisor start --owner ID|--session ID [--label L] [--cwd DIR] -- PROMPT
+subagent-supervisor wait  --owner ID|--session ID [--ids A,B] [--mode any|all] [--timeout SEC]
+subagent-supervisor list  [--owner ID|--session ID]
+subagent-supervisor show  JOB_ID
+subagent-supervisor tail  JOB_ID [--follow|-f]
+subagent-supervisor top
 ```
+
+The `start` command wraps the given PROMPT in `scripts/claude-subagent` automatically.
+Only `claude-subagent` is allowed as a launcher — raw bash commands are rejected by the daemon.
+In test mode (`config/test.exs`), `allowed_launchers: ["bash"]` permits direct bash for unit tests.
 
 ## Key Paths
 
-- Source: `lib/codex_subagents/*.ex`
+- Source: `lib/subagent_supervisor/*.ex`
 - Tests: `test/*_test.exs`
-- Skill definition: `skills/codex-subagents/SKILL.md`
-- Escript config: `mix.exs` (`escript: [main_module: CLI, name: "codex-subagents"]`)
+- Config: `config/config.exs`, `config/dev.exs`, `config/test.exs`
+- Launcher script: `scripts/claude-subagent`
+- Skill definition: `skills/subagent-supervisor/SKILL.md`
+- Escript config: `mix.exs` (`escript: [main_module: CLI, name: "subagent-supervisor"]`)
 - Release package script: `scripts/package`
