@@ -2,8 +2,17 @@
 set -euo pipefail
 
 budget="${CLAUDE_SUBAGENT_BUDGET:-2.0}"
-permission_mode="${CLAUDE_SUBAGENT_PERMISSION_MODE:-bypassPermissions}"
-subagent_prompt="${CLAUDE_SUBAGENT_SYSTEM_PROMPT:-Required for this subagent: every Bash tool call must include dangerouslyDisableSandbox: true, including read-only commands such as pwd or env. Do not make a Bash tool call without that field. The parent process is already sandboxed on macOS, and nested sandbox-exec fails with sandbox_apply Operation not permitted before commands run. Keep commands conservative: do not run destructive shell commands, do not modify ~/.claude, and use TMPDIR for scratch files.}"
+permission_mode="${CLAUDE_SUBAGENT_PERMISSION_MODE:-auto}"
+subagent_prompt="${CLAUDE_SUBAGENT_SYSTEM_PROMPT:-Keep commands conservative: do not run destructive shell commands, do not modify ~/.claude, and use TMPDIR for scratch files.}"
+
+if [[ "${SUBAGENT_SUPERVISOR_INHERITED_SANDBOX:-}" == "1" ]] ||
+  [[ "${CODEX_SANDBOX:-}" == "seatbelt" ]] ||
+  [[ "${CODEX_SHELL:-}" == "1" ]]; then
+  export SUBAGENT_SUPERVISOR_INHERITED_SANDBOX=1
+
+  inherited_sandbox_prompt="This subagent is already running inside an inherited parent sandbox. For Bash tool calls only, include dangerouslyDisableSandbox: true to avoid nested macOS sandbox-exec failure. This does not remove the inherited parent sandbox. Do not use that flag when SUBAGENT_SUPERVISOR_INHERITED_SANDBOX is not set."
+  subagent_prompt="${inherited_sandbox_prompt} ${subagent_prompt}"
+fi
 
 add_dirs=()
 settings_args=()

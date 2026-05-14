@@ -306,7 +306,7 @@ defmodule SubagentSupervisor.Registry do
             text =
               case mode do
                 :verbose -> StreamJSON.extract_verbose(raw)
-                _ -> StreamJSON.format_incremental(raw, 0) |> elem(0)
+                _ -> raw |> StreamJSON.format_incremental(0) |> elem(0) |> tagged_text()
               end
 
             {:ok, text}
@@ -603,6 +603,12 @@ defmodule SubagentSupervisor.Registry do
     head = String.slice(text, 0, @head_chars)
     tail = String.slice(text, String.length(text) - @tail_chars, @tail_chars)
     head <> "\n\n... [truncated] ...\n\n" <> tail
+  end
+
+  defp tagged_text(chunks) do
+    chunks
+    |> Enum.map(fn {text, _color} -> text end)
+    |> Enum.join()
   end
 
   defp required!(attrs, key) do

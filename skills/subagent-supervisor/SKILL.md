@@ -36,13 +36,15 @@ The command prints JSON containing `id`, `status`, `owner`, `label`, and timesta
 
 Prefer a sandbox profile that allows repository edits, the agent's dynamic temp directory, and Claude shell session setup, while keeping git internals and agent configuration protected.
 
-For Claude Code subagents on macOS, Bash tool calls must set `dangerouslyDisableSandbox: true`. The parent process is already sandboxed, and nested `sandbox-exec` initialization can fail before even read-only commands such as `pwd` run.
+When a subagent inherits a parent sandbox such as Codex's macOS seatbelt sandbox, Bash tool calls may need `dangerouslyDisableSandbox: true` to avoid nested `sandbox-exec` failure. Only use that workaround when `SUBAGENT_SUPERVISOR_INHERITED_SANDBOX=1`; otherwise let Claude Code apply its own sandbox normally.
 
 Do not hardcode observed temp paths; resolve the effective temp root from `$TMPDIR`, `System.tmp_dir!()`, or `mktemp -d` for the current job.
 
 ```yaml
 sandbox:
-  dangerouslyDisableSandbox: true
+  inheritedParent: "$SUBAGENT_SUPERVISOR_INHERITED_SANDBOX"
+  useClaudeCodeSandboxWhenNoParent: true
+  disableNestedBashSandboxOnlyWhenInherited: true
 write:
   allowOnly:
     - "."
