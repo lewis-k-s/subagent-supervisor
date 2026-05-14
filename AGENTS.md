@@ -28,7 +28,7 @@ mix format --check-formatted    # style check
 
 ## Architecture
 
-Six modules in `lib/subagent_supervisor/`:
+Seven modules in `lib/subagent_supervisor/`:
 
 | Module | Role |
 |---|---|
@@ -38,6 +38,7 @@ Six modules in `lib/subagent_supervisor/`:
 | `Job` | struct with `@enforce_keys` for immutable job metadata |
 | `JSON` | hand-rolled encoder (zero external deps) |
 | `Top` | Ratatouille TUI dashboard — live view of jobs & supervision tree |
+| `Agents` | Discovers and validates Claude Code agent definitions from filesystem |
 
 Daemon and CLI communicate over distributed Erlang (short names, shared cookie `:subagent_supervisor`). The daemon node name is host-global (`subagent_supervisor@<host>`), so one server is shared across active sessions and repositories on the same host. External dependency: `ratatouille` (TUI framework, used only by the `top` command).
 
@@ -64,7 +65,8 @@ The daemon auto-starts on first use — any CLI command (`start`, `wait`, `list`
 subagent-supervisor server [--max-concurrency N]
 subagent-supervisor stop
 subagent-supervisor session [--prefix PREFIX]
-subagent-supervisor start --owner ID|--session ID [--label L] [--cwd DIR] -- PROMPT
+subagent-supervisor agents [--cwd DIR]
+subagent-supervisor start --owner ID|--session ID [--label L] [--agent NAME] [--cwd DIR] -- PROMPT
 subagent-supervisor wait  --owner ID|--session ID [--ids A,B] [--mode any|all] [--timeout SEC]
 subagent-supervisor list  [--owner ID|--session ID]
 subagent-supervisor show  JOB_ID [--full]
@@ -76,6 +78,8 @@ subagent-supervisor top
 The `start` command wraps the given PROMPT in `scripts/claude-subagent` automatically.
 Only `claude-subagent` is allowed as a launcher — raw bash commands are rejected by the daemon.
 In test mode (`config/test.exs`), `allowed_launchers: ["bash"]` permits direct bash for unit tests.
+
+The `--agent NAME` flag passes an agent name through to `claude --agent NAME`. Both the CLI and daemon validate the agent exists in `~/.claude/agents/` (user-level) or `<cwd>/.claude/agents/` (project-level) before dispatching. Use `subagent-supervisor agents` to list available agents.
 
 ## Key Paths
 

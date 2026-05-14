@@ -32,6 +32,22 @@ subagent-supervisor start --session "$SUBAGENT_SUPERVISOR_SESSION" --label "api-
 
 The command prints JSON containing `id`, `status`, `owner`, `label`, and timestamps. Preserve returned ids when the wake rule applies only to a subset of jobs.
 
+### Agent Dispatch
+
+To dispatch to a specific Claude Code agent, use `--agent NAME`. Available agents are discovered from `~/.claude/agents/` (user-level) and `<cwd>/.claude/agents/` (project-level). List available agents with:
+
+```bash
+subagent-supervisor agents
+```
+
+Then dispatch with:
+
+```bash
+subagent-supervisor start --session "$SUBAGENT_SUPERVISOR_SESSION" --agent docs-czar --label "api-docs" --cwd "$PWD" -- "Document the API endpoints"
+```
+
+The agent name is validated at both the CLI and daemon level — an unknown agent name will produce a clear error listing available agents.
+
 ## Default Sandbox Profile
 
 Prefer a sandbox profile that allows repository edits, the agent's dynamic temp directory, and Claude shell session setup, while keeping git internals and agent configuration protected.
