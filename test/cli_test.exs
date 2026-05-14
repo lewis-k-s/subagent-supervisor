@@ -107,6 +107,33 @@ defmodule SubagentSupervisor.CLITest do
       assert output =~ "subagent-supervisor server"
       assert output =~ "subagent-supervisor session"
       assert output =~ "subagent-supervisor start"
+      assert output =~ "subagent-supervisor agents"
+      assert output =~ "--agent"
+    end
+  end
+
+  describe "agents command" do
+    test "agents outputs JSON list of discovered agents" do
+      tmp = Path.join(System.tmp_dir!(), "cli-agents-test-#{System.unique_integer([:positive])}")
+      user_home = Path.join(tmp, "home")
+      File.mkdir_p!(Path.join(user_home, ".claude/agents"))
+
+      File.write!(
+        Path.join([user_home, ".claude", "agents", "cli-test.md"]),
+        "---\nname: cli-test\ndescription: CLI test agent\n---\nBody"
+      )
+
+      old_home = System.get_env("HOME")
+      System.put_env("HOME", user_home)
+
+      on_exit(fn ->
+        restore_env("HOME", old_home)
+        File.rm_rf!(tmp)
+      end)
+
+      output = capture_io(fn -> SubagentSupervisor.CLI.main(["agents"]) end)
+      assert output =~ "cli-test"
+      assert output =~ "CLI test agent"
     end
   end
 

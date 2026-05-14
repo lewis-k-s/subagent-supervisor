@@ -436,4 +436,87 @@ defmodule SubagentSupervisor.RegistryTest do
                })
     end
   end
+
+  describe "agent support" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "agents-reg-test-#{System.unique_integer([:positive])}")
+      user_home = Path.join(tmp, "home")
+      File.mkdir_p!(Path.join(user_home, ".claude/agents"))
+
+      write_agent(Path.join([user_home, ".claude", "agents", "test-agent.md"]), %{
+        "name" => "test-agent",
+        "description" => "Test agent"
+      })
+
+      old_home = System.get_env("HOME")
+      System.put_env("HOME", user_home)
+
+      on_exit(fn ->
+        restore_env("HOME", old_home)
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    test "start_job stores agent on job and returns it" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "agent-test",
+                 "command" => "bash -c 'printf hello'",
+                 "agent" => "test-agent",
+                 "cwd" => File.cwd!()
+               })
+
+      assert job.agent == "test-agent"
+    end
+
+    test "start_job without agent stores nil" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "no-agent-test",
+                 "command" => "bash -c 'printf hello'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert job.agent == nil
+    end
+
+    test "start_job raises on unknown agent" do
+      assert catch_exit(
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "bad-agent",
+                 "command" => "bash -c 'printf hello'",
+                 "agent" => "nonexistent-agent",
+                 "cwd" => File.cwd!()
+               })
+             )
+    end
+
+    test "public_job includes agent field" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "pub-agent",
+                 "command" => "bash -c 'printf hi'",
+                 "agent" => "test-agent",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("pub-agent", [job.id], :all, 5_000)
+
+      assert finished.agent == "test-agent"
+    end
+  end
+
+  defp write_agent(path, frontmatter) do
+    fm_lines =
+      Enum.map(frontmatter, fn {k, v} -> "#{k}: #{v}" end)
+      |> Enum.join("\n")
+
+    File.write!(path, "---\n#{fm_lines}\n---\nAgent body")
+  end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 end

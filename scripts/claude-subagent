@@ -34,6 +34,17 @@ if [[ -n "${HOME:-}" ]]; then
   add_dirs+=(--add-dir "$HOME/.claude/session-env" --add-dir "$HOME/.claude/debug")
 fi
 
+agent_name=""
+if [[ "${1:-}" == "--agent" ]]; then
+  agent_name="$2"
+  shift 2
+fi
+
+agent_args=()
+if [[ -n "$agent_name" ]]; then
+  agent_args=(--agent "$agent_name")
+fi
+
 user_prompt="$*"
 prompt="${subagent_prompt}
 
@@ -52,4 +63,5 @@ exec claude -p \
   --include-partial-messages \
   --verbose \
   --no-session-persistence \
+  "${agent_args[@]}" \
   "$prompt"

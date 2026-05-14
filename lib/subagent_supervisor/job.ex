@@ -10,6 +10,7 @@ defmodule SubagentSupervisor.Job do
     :command,
     :cwd,
     :label,
+    :agent,
     :status,
     :exit_status,
     :output,

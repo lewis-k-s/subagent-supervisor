@@ -150,8 +150,11 @@ defmodule SubagentSupervisor.Registry do
     validate_command!(command, state.allowed_launchers)
     cwd = Map.get(attrs, "cwd", File.cwd!())
     label = Map.get(attrs, "label")
+    agent = Map.get(attrs, "agent")
     id = Map.get(attrs, "id", new_id())
     inserted_at = now()
+
+    if agent, do: validate_agent!(agent, cwd)
 
     job = %Job{
       id: id,
@@ -159,6 +162,7 @@ defmodule SubagentSupervisor.Registry do
       command: command,
       cwd: cwd,
       label: label,
+      agent: agent,
       status: :queued,
       inserted_at: inserted_at,
       started_at: nil
@@ -544,6 +548,7 @@ defmodule SubagentSupervisor.Registry do
       id: job.id,
       owner: job.owner,
       label: job.label,
+      agent: job.agent,
       command: job.command,
       cwd: job.cwd,
       status: job.status,
@@ -678,6 +683,24 @@ defmodule SubagentSupervisor.Registry do
       launcher
     else
       "'" <> String.replace(launcher, "'", "'\"'\"'") <> "'"
+    end
+  end
+
+  defp validate_agent!(agent_name, cwd) do
+    case SubagentSupervisor.Agents.validate(agent_name, cwd) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:not_found, name}} ->
+        available =
+          SubagentSupervisor.Agents.discover(cwd)
+          |> Enum.map(& &1.name)
+          |> Enum.sort()
+          |> Enum.join(", ")
+
+        raise ArgumentError,
+              "unknown agent: #{name}" <>
+                if(available != "", do: " (available: #{available})", else: "")
     end
   end
 end

@@ -20,6 +20,7 @@ defmodule SubagentSupervisor.CLI do
       ["show" | rest] -> show(rest)
       ["status" | rest] -> status_cmd(rest)
       ["tail" | rest] -> tail_cmd(rest)
+      ["agents" | rest] -> agents(rest)
       ["top"] -> top()
       ["help"] -> help()
       ["--help"] -> help()
@@ -66,6 +67,23 @@ defmodule SubagentSupervisor.CLI do
     IO.puts(SubagentSupervisor.JSON.encode(%{owner: id, session: id}))
   end
 
+  defp agents(rest) do
+    opts = parse_flags(rest)
+    cwd = Map.get(opts, "cwd", File.cwd!())
+
+    agents =
+      SubagentSupervisor.Agents.discover(cwd)
+      |> Enum.map(fn agent ->
+        %{
+          name: agent.name,
+          description: agent.description,
+          source: agent.source
+        }
+      end)
+
+    IO.puts(SubagentSupervisor.JSON.encode(agents))
+  end
+
   defp start(rest) do
     {flags, prompt_args} = split_command(rest)
 
@@ -74,16 +92,43 @@ defmodule SubagentSupervisor.CLI do
     end
 
     opts = parse_flags(flags)
+    agent_name = Map.get(opts, "agent")
+    cwd = Map.get(opts, "cwd", File.cwd!())
+
+    if agent_name do
+      case SubagentSupervisor.Agents.validate(agent_name, cwd) do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:not_found, name}} ->
+          available =
+            SubagentSupervisor.Agents.discover(cwd)
+            |> Enum.map(& &1.name)
+            |> Enum.sort()
+            |> Enum.join(", ")
+
+          fail(
+            "unknown agent: #{name}" <>
+              if(available != "", do: " (available: #{available})", else: "")
+          )
+      end
+    end
 
     launcher =
       resolve_launcher!()
 
-    command = shell_join([launcher | prompt_args])
+    launcher_args =
+      if agent_name,
+        do: ["--agent", agent_name | prompt_args],
+        else: prompt_args
+
+    command = shell_join([launcher | launcher_args])
 
     attrs = %{
       "owner" => session_owner(opts),
       "label" => Map.get(opts, "label"),
-      "cwd" => Map.get(opts, "cwd", File.cwd!()),
+      "agent" => agent_name,
+      "cwd" => cwd,
       "command" => command
     }
 
@@ -631,7 +676,8 @@ defmodule SubagentSupervisor.CLI do
     subagent-supervisor server [--max-concurrency 2]
     subagent-supervisor stop
     subagent-supervisor session [--prefix PREFIX]
-    subagent-supervisor start --owner OWNER|--session SESSION [--label LABEL] [--cwd DIR] -- PROMPT
+    subagent-supervisor agents [--cwd DIR]
+    subagent-supervisor start --owner OWNER|--session SESSION [--label LABEL] [--agent NAME] [--cwd DIR] -- PROMPT
     subagent-supervisor wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
     subagent-supervisor list [--owner OWNER|--session SESSION]
     subagent-supervisor show JOB_ID [--full]
