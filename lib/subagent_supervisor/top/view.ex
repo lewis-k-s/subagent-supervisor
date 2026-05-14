@@ -4,10 +4,34 @@ defmodule SubagentSupervisor.Top.View do
   import Ratatouille.View
   alias SubagentSupervisor.Top.Format
 
+  # Vertical: 2 bars (top + bottom) + 2 panel border + 2 panel padding
+  @output_v_chrome 6
+  # Horizontal: 2 panel border + 2 panel padding
+  @output_h_chrome 4
+
+  @min_width 40
+  @min_height 12
+
   def render(model) do
-    case model.view_mode do
-      :dashboard -> render_dashboard(model)
-      :output -> render_output(model)
+    if too_small?(model) do
+      render_too_small(model)
+    else
+      case model.view_mode do
+        :dashboard -> render_dashboard(model)
+        :output -> render_output(model)
+      end
+    end
+  end
+
+  defp too_small?(model) do
+    h = model.window_height || 0
+    w = model.window_width || 0
+    h < @min_height or w < @min_width
+  end
+
+  defp render_too_small(_model) do
+    view do
+      label(content: "Window too small (need #{@min_width}x#{@min_height})")
     end
   end
 
@@ -30,7 +54,7 @@ defmodule SubagentSupervisor.Top.View do
               if model.total_jobs == 0 do
                 label(content: "  No jobs", color: :black)
               else
-                render_jobs(model)
+                [column_header()] ++ render_jobs(model)
               end
             end
           end
@@ -40,21 +64,24 @@ defmodule SubagentSupervisor.Top.View do
   end
 
   defp render_output(model) do
-    all_lines = String.split(model.selected_job_output, "\n")
+    job = find_selected_job(model)
+    content_width = output_content_width(model)
+    output_lines = model.selected_job_output
+
+    status_row =
+      if job,
+        do: [{"#{Format.status_icon(job.status)} #{job.status}", Format.status_color(job.status)}],
+        else: []
+
+    prompt = prompt_header(job, content_width)
+    header = status_row ++ prompt
+    all_lines = header ++ output_lines
     total_lines = length(all_lines)
     visible = output_visible_lines(model)
-    content_width = output_content_width(model)
 
     output_elements =
       cond do
-        all_lines == [""] ->
-          pad_labels(
-            [label(content: pad_line("  (no output yet)", content_width), color: :black)],
-            visible,
-            content_width
-          )
-
-        total_lines == 0 ->
+        output_lines == [] and prompt == [] ->
           pad_labels(
             [label(content: pad_line("  (no output yet)", content_width), color: :black)],
             visible,
@@ -63,17 +90,24 @@ defmodule SubagentSupervisor.Top.View do
 
         true ->
           max_scroll = max(total_lines - visible, 0)
-          effective_scroll = min(model.output_scroll, max_scroll)
+
+          effective_scroll =
+            if model.output_auto_scroll,
+              do: max_scroll,
+              else: min(model.output_scroll, max_scroll)
 
           start_idx = effective_scroll
           end_idx = min(start_idx + visible, total_lines) - 1
 
-          sliced =
+          rendered =
             all_lines
             |> Enum.slice(start_idx..end_idx)
-            |> Enum.map(&label(content: pad_line(&1, content_width)))
+            |> Enum.take(visible)
+            |> Enum.map(fn {line, color} ->
+              label(content: pad_line(line, content_width), color: color)
+            end)
 
-          pad_labels(sliced, visible, content_width)
+          pad_labels(rendered, visible, content_width)
       end
 
     view(top_bar: output_top_bar(model), bottom_bar: output_bottom_bar()) do
@@ -87,14 +121,20 @@ defmodule SubagentSupervisor.Top.View do
     bar do
       label(
         content:
-          " subagent-supervisor | viewing output | up #{Format.format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}"
+          " subagent-supervisor | viewing output | up #{Format.format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}",
+        color: :white,
+        background: :blue
       )
     end
   end
 
   defp output_bottom_bar do
     bar do
-      label(content: " esc back | \u2191\u2193/pgup/pgdn/home/end scroll | r verbose | q quit")
+      label(
+        content: " esc back | \u2191\u2193/pgup/pgdn/home/end scroll | r verbose | q quit",
+        color: :black,
+        background: :white
+      )
     end
   end
 
@@ -104,10 +144,9 @@ defmodule SubagentSupervisor.Top.View do
     if job do
       id = Format.truncate_id(job.id)
       label_part = if job.label, do: " [#{job.label}]", else: ""
-      status_part = "#{Format.status_icon(job.status)} #{job.status}"
       duration = Format.format_duration(job)
       mode = if model.output_verbose, do: "VERBOSE", else: "parsed"
-      "Output: #{id}#{label_part} #{status_part} #{duration} [#{mode}]"
+      "Output: #{id}#{label_part} #{duration} [#{mode}]"
     else
       "Output"
     end
@@ -120,7 +159,7 @@ defmodule SubagentSupervisor.Top.View do
   defp output_visible_lines(model) do
     default = 24
     height = model.window_height || default
-    max(height - 6, 1)
+    max(height - @output_v_chrome, 1)
   end
 
   defp pad_labels(labels, target_count, content_width) do
@@ -152,21 +191,27 @@ defmodule SubagentSupervisor.Top.View do
   defp output_content_width(model) do
     default = 80
     width = model.window_width || default
-    max(width - 6, 10)
+    max(width - @output_h_chrome, 10)
   end
 
   defp top_bar(model) do
     bar do
       label(
         content:
-          " subagent-supervisor | up #{Format.format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}"
+          " subagent-supervisor | up #{Format.format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}",
+        color: :white,
+        background: :blue
       )
     end
   end
 
   defp dashboard_bottom_bar do
     bar do
-      label(content: " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output")
+      label(
+        content: " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output",
+        color: :black,
+        background: :white
+      )
     end
   end
 
@@ -184,14 +229,16 @@ defmodule SubagentSupervisor.Top.View do
   defp render_supervision_tree(tree) do
     tree
     |> Enum.flat_map(&tree_lines/1)
-    |> Enum.map(&label(content: &1))
+    |> Enum.map(fn {text, color} -> label(content: text, color: color) end)
   end
 
   defp tree_lines(node, depth \\ 0) do
     indent = String.duplicate("  ", depth)
-    line = "#{indent}#{node.name} #{Format.format_pid_short(Map.get(node, :pid, "not started"))}"
+    pid = Format.format_pid_short(Map.get(node, :pid, "not started"))
+    line = "#{indent}#{node.name} #{pid}"
+    color = if Map.get(node, :children, []) != [], do: :green, else: :cyan
 
-    [line | Enum.flat_map(Map.get(node, :children, []), &tree_lines(&1, depth + 1))]
+    [{line, color} | Enum.flat_map(Map.get(node, :children, []), &tree_lines(&1, depth + 1))]
   end
 
   defp render_jobs(model) do
@@ -217,7 +264,7 @@ defmodule SubagentSupervisor.Top.View do
         else: [label(content: "")]
 
     spacer ++
-      [label(content: "Owner: #{owner} (#{count} jobs)")]
+      [label(content: "Owner: #{owner} (#{count} jobs)", color: :magenta)]
   end
 
   defp owner_job_rows(jobs, selected_index, start_idx) do
@@ -260,6 +307,16 @@ defmodule SubagentSupervisor.Top.View do
     |> IO.iodata_to_binary()
   end
 
+  defp column_header do
+    label(
+      content:
+        "    " <>
+          pad("ID", 12) <>
+          pad("STATUS", 11) <> pad("DURATION", 8) <> pad("LABEL", 14) <> "COMMAND",
+      color: :cyan
+    )
+  end
+
   defp pad(value, width) do
     value = to_string(value)
     value <> String.duplicate(" ", max(width - String.length(value), 1))
@@ -269,5 +326,51 @@ defmodule SubagentSupervisor.Top.View do
     Enum.reduce(tree, 0, fn node, acc ->
       acc + 1 + count_tree_nodes(Map.get(node, :children, []))
     end)
+  end
+
+  defp prompt_header(nil, _width), do: []
+  defp prompt_header(%{command: nil}, _width), do: []
+  defp prompt_header(%{command: ""}, _width), do: []
+
+  defp prompt_header(%{command: command}, width) do
+    wrapped = wrap_text(command, width)
+
+    [{divider("Input", width), :cyan}] ++
+      Enum.map(wrapped, &{&1, :yellow}) ++
+      [{divider("Output", width), :cyan}]
+  end
+
+  defp divider(label, width) do
+    prefix = "── #{label} "
+    prefix <> String.duplicate("─", max(width - String.length(prefix), 0))
+  end
+
+  defp wrap_text(text, width) do
+    text
+    |> String.split("\n")
+    |> Enum.flat_map(&wrap_line(&1, width))
+  end
+
+  defp wrap_line(line, width) do
+    if String.length(line) <= width do
+      [line]
+    else
+      do_word_wrap(String.split(line), width, [], "")
+    end
+  end
+
+  defp do_word_wrap([], _width, lines, ""), do: Enum.reverse(lines)
+  defp do_word_wrap([], _width, lines, current), do: Enum.reverse([current | lines])
+
+  defp do_word_wrap([word | rest], width, lines, "") do
+    do_word_wrap(rest, width, lines, word)
+  end
+
+  defp do_word_wrap([word | rest], width, lines, current) do
+    if String.length(current) + 1 + String.length(word) <= width do
+      do_word_wrap(rest, width, lines, "#{current} #{word}")
+    else
+      do_word_wrap(rest, width, [current | lines], word)
+    end
   end
 end

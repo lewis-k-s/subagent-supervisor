@@ -205,7 +205,7 @@ defmodule SubagentSupervisor.TopTest do
       updated = Top.update(model, {:event, %{key: key(:esc)}})
       assert updated.view_mode == :dashboard
       assert updated.selected_job_id == nil
-      assert updated.selected_job_output == ""
+      assert updated.selected_job_output == []
       assert updated.output_verbose == false
       assert updated.output_scroll == 0
     end
@@ -302,6 +302,8 @@ defmodule SubagentSupervisor.TopTest do
   end
 
   describe "render/1 - dashboard" do
+    @describetag :tui
+
     test "renders supervision tree roots without pid" do
       model = %Top{
         daemon: :ignored,
@@ -414,6 +416,8 @@ defmodule SubagentSupervisor.TopTest do
   end
 
   describe "render/1 - output mode" do
+    @describetag :tui
+
     test "renders output view with panel title" do
       now = DateTime.utc_now()
 
@@ -421,7 +425,9 @@ defmodule SubagentSupervisor.TopTest do
         daemon: :ignored,
         view_mode: :output,
         selected_job_id: "job_abc123",
-        selected_job_output: "line1\nline2\nline3",
+        selected_job_output: [{"line1", nil}, {"line2", nil}, {"line3", nil}],
+        window_height: 30,
+        window_width: 100,
         all_jobs: [
           %{
             id: "job_abc123",
@@ -444,14 +450,16 @@ defmodule SubagentSupervisor.TopTest do
       assert output =~ "line3"
     end
 
-    test "renders no output yet message when empty" do
+    test "renders prompt header when output is empty but command exists" do
       now = DateTime.utc_now()
 
       model = %Top{
         daemon: :ignored,
         view_mode: :output,
         selected_job_id: "job_abc123",
-        selected_job_output: "",
+        selected_job_output: [],
+        window_height: 30,
+        window_width: 100,
         all_jobs: [
           %{
             id: "job_abc123",
@@ -460,6 +468,36 @@ defmodule SubagentSupervisor.TopTest do
             finished_at: nil,
             label: nil,
             command: "echo hi",
+            inserted_at: now
+          }
+        ]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "── Input"
+      assert output =~ "echo hi"
+      assert output =~ "── Output"
+    end
+
+    test "renders no output yet message when no command and empty output" do
+      now = DateTime.utc_now()
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        selected_job_id: "job_abc123",
+        selected_job_output: [],
+        window_height: 30,
+        window_width: 100,
+        all_jobs: [
+          %{
+            id: "job_abc123",
+            status: :running,
+            started_at: now,
+            finished_at: nil,
+            label: nil,
+            command: nil,
             inserted_at: now
           }
         ]

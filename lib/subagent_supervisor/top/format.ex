@@ -9,7 +9,7 @@ defmodule SubagentSupervisor.Top.Format do
 
   @doc false
   def status_color(:running), do: :yellow
-  def status_color(:queued), do: :white
+  def status_color(:queued), do: :black
   def status_color(:succeeded), do: :green
   def status_color(:failed), do: :red
   def status_color(_), do: :white

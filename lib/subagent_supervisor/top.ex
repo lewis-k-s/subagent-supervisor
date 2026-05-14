@@ -27,7 +27,7 @@ defmodule SubagentSupervisor.Top do
     selected_index: 0,
     view_mode: :dashboard,
     selected_job_id: nil,
-    selected_job_output: "",
+    selected_job_output: [],
     output_verbose: false,
     output_scroll: 0,
     output_auto_scroll: true,

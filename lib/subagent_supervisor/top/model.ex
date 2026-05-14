@@ -17,6 +17,9 @@ defmodule SubagentSupervisor.Top.Model do
 
   @output_buffer 100
 
+  # Vertical: 2 bars (top + bottom) + 2 panel border + 2 panel padding
+  @output_v_chrome 6
+
   alias SubagentSupervisor.Top
 
   def init(%{daemon: daemon, window: %{height: height, width: width}}) do
@@ -68,7 +71,7 @@ defmodule SubagentSupervisor.Top.Model do
             model
             | output_verbose: not model.output_verbose,
               output_byte_offset: 0,
-              selected_job_output: ""
+              selected_job_output: []
           }
         else
           model
@@ -80,7 +83,7 @@ defmodule SubagentSupervisor.Top.Model do
             model
             | view_mode: :dashboard,
               selected_job_id: nil,
-              selected_job_output: "",
+              selected_job_output: [],
               output_verbose: false,
               output_scroll: 0,
               output_byte_offset: 0
@@ -101,7 +104,7 @@ defmodule SubagentSupervisor.Top.Model do
                 output_scroll: 0,
                 output_auto_scroll: true,
                 output_byte_offset: 0,
-                selected_job_output: ""
+                selected_job_output: []
             }
 
             fetch_output(model)
@@ -130,8 +133,8 @@ defmodule SubagentSupervisor.Top.Model do
       {:event, %{key: @key_end}} ->
         handle_end(model)
 
-      {:event, %{type: @event_resize, h: h}} ->
-        %{model | window_height: h}
+      {:event, %{type: @event_resize, h: h, w: w}} ->
+        %{model | window_height: h, window_width: w}
 
       _ ->
         model
@@ -229,7 +232,7 @@ defmodule SubagentSupervisor.Top.Model do
             :format_incremental
           end
 
-        {new_text, new_offset} =
+        {new_tagged, new_offset} =
           :rpc.call(
             model.daemon,
             SubagentSupervisor.StreamJSON,
@@ -237,13 +240,26 @@ defmodule SubagentSupervisor.Top.Model do
             [raw_content, model.output_byte_offset]
           )
 
-        appended_output = model.selected_job_output <> new_text
+        new_tagged =
+          case new_tagged do
+            list when is_list(list) -> list
+            _ -> []
+          end
+
+        new_offset =
+          case new_offset do
+            offset when is_integer(offset) -> offset
+            _ -> model.output_byte_offset
+          end
+
+        flattened = flatten_tagged_lines(new_tagged)
+        appended_output = model.selected_job_output ++ flattened
 
         {trimmed_output, scroll_adj} = trim_output(appended_output, model)
 
         scroll =
           if model.output_auto_scroll do
-            line_count = trimmed_output |> String.split("\n") |> length()
+            line_count = length(trimmed_output)
             visible = output_visible_lines(model)
             max(0, line_count - visible)
           else
@@ -262,15 +278,22 @@ defmodule SubagentSupervisor.Top.Model do
     end
   end
 
+  defp flatten_tagged_lines(tagged) do
+    Enum.flat_map(tagged, fn {text, color} ->
+      text
+      |> String.split("\n")
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&{&1, color})
+    end)
+  end
+
   defp trim_output(output, model) do
     visible = output_visible_lines(model)
     max_lines = visible + @output_buffer
-    lines = String.split(output, "\n")
 
-    if length(lines) > max_lines do
-      kept = Enum.take(lines, -max_lines)
-      trimmed_count = length(lines) - max_lines
-      {Enum.join(kept, "\n"), trimmed_count}
+    if length(output) > max_lines do
+      trimmed_count = length(output) - max_lines
+      {Enum.take(output, -max_lines), trimmed_count}
     else
       {output, 0}
     end
@@ -279,7 +302,7 @@ defmodule SubagentSupervisor.Top.Model do
   defp output_visible_lines(model) do
     default = 24
     height = model.window_height || default
-    max(height - 6, 1)
+    max(height - @output_v_chrome, 1)
   end
 
   defp dashboard_visible_jobs(model) do
