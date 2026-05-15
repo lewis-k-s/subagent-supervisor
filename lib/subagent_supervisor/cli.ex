@@ -21,6 +21,7 @@ defmodule SubagentSupervisor.CLI do
       ["status" | rest] -> status_cmd(rest)
       ["tail" | rest] -> tail_cmd(rest)
       ["agents" | rest] -> agents(rest)
+      ["register" | rest] -> register(rest)
       ["top"] -> top()
       ["help"] -> help()
       ["--help"] -> help()
@@ -84,6 +85,62 @@ defmodule SubagentSupervisor.CLI do
     IO.puts(SubagentSupervisor.JSON.encode(agents))
   end
 
+  defp register(rest) do
+    opts = parse_flags(rest)
+    owner = session_owner(opts)
+    session_id = Map.get(opts, "session-id")
+    cwd = Map.get(opts, "cwd", File.cwd!())
+    label = Map.get(opts, "label")
+
+    if is_nil(owner) do
+      fail("missing required --owner")
+    end
+
+    session_id =
+      if is_nil(session_id) do
+        discover_session_id(cwd) || fail("could not auto-discover session ID; use --session-id")
+      else
+        session_id
+      end
+
+    attrs = %{
+      "owner" => owner,
+      "session_id" => session_id,
+      "label" => label,
+      "cwd" => cwd
+    }
+
+    rpc!(SubagentSupervisor.Registry, :register, [attrs])
+    |> print_result()
+  end
+
+  @doc false
+  def discover_session_id(cwd) do
+    project_slug =
+      cwd
+      |> String.replace("/", "-")
+      |> String.replace_prefix("-", "")
+
+    dir = Path.join([System.user_home!(), ".claude", "projects", project_slug])
+
+    case File.ls(dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&String.ends_with?(&1, ".jsonl"))
+        |> Enum.map(fn f -> {f, Path.join(dir, f)} end)
+        |> Enum.filter(fn {_, p} -> File.exists?(p) end)
+        |> Enum.sort_by(fn {_, p} -> File.stat!(p).mtime end, :desc)
+        |> List.first()
+        |> case do
+          {name, _} -> String.replace_suffix(name, ".jsonl", "")
+          nil -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
   defp start(rest) do
     {flags, prompt_args} = split_command(rest)
 
@@ -93,7 +150,35 @@ defmodule SubagentSupervisor.CLI do
 
     opts = parse_flags(flags)
     agent_name = Map.get(opts, "agent")
+    resume_session = Map.get(opts, "resume-session")
+    resume_job = Map.get(opts, "resume-job")
     cwd = Map.get(opts, "cwd", File.cwd!())
+
+    cond do
+      resume_session && resume_job ->
+        fail("--resume-session and --resume-job are mutually exclusive")
+
+      (resume_session || resume_job) && agent_name ->
+        fail("--resume-session/--resume-job and --agent are mutually exclusive")
+
+      true ->
+        :ok
+    end
+
+    # Resolve --resume-job to a session_id
+    resume_session =
+      if resume_job do
+        case rpc!(SubagentSupervisor.Registry, :show, [resume_job]) do
+          {:ok, job} ->
+            job.session_id ||
+              fail("job #{resume_job} has no session_id")
+
+          {:error, :not_found} ->
+            fail("job #{resume_job} not found")
+        end
+      else
+        resume_session
+      end
 
     if agent_name do
       case SubagentSupervisor.Agents.validate(agent_name, cwd) do
@@ -118,9 +203,16 @@ defmodule SubagentSupervisor.CLI do
       resolve_launcher!()
 
     launcher_args =
-      if agent_name,
-        do: ["--agent", agent_name | prompt_args],
-        else: prompt_args
+      cond do
+        resume_session ->
+          ["--resume", resume_session | prompt_args]
+
+        agent_name ->
+          ["--agent", agent_name | prompt_args]
+
+        true ->
+          prompt_args
+      end
 
     command = shell_join([launcher | launcher_args])
 
@@ -128,6 +220,7 @@ defmodule SubagentSupervisor.CLI do
       "owner" => session_owner(opts),
       "label" => Map.get(opts, "label"),
       "agent" => agent_name,
+      "session_id" => resume_session,
       "cwd" => cwd,
       "command" => command
     }
@@ -677,7 +770,8 @@ defmodule SubagentSupervisor.CLI do
     subagent-supervisor stop
     subagent-supervisor session [--prefix PREFIX]
     subagent-supervisor agents [--cwd DIR]
-    subagent-supervisor start --owner OWNER|--session SESSION [--label LABEL] [--agent NAME] [--cwd DIR] -- PROMPT
+    subagent-supervisor register --owner OWNER [--session-id UUID] [--label LABEL] [--cwd DIR]
+    subagent-supervisor start --owner OWNER|--session SESSION [--label LABEL] [--agent NAME] [--resume-session UUID] [--resume-job JOB_ID] [--cwd DIR] -- PROMPT
     subagent-supervisor wait --owner OWNER|--session SESSION [--ids ID,ID] [--mode any|all] [--timeout SECONDS]
     subagent-supervisor list [--owner OWNER|--session SESSION]
     subagent-supervisor show JOB_ID [--full]

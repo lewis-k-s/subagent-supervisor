@@ -3,15 +3,12 @@ set -euo pipefail
 
 budget="${CLAUDE_SUBAGENT_BUDGET:-2.0}"
 permission_mode="${CLAUDE_SUBAGENT_PERMISSION_MODE:-auto}"
-subagent_prompt="${CLAUDE_SUBAGENT_SYSTEM_PROMPT:-Keep commands conservative: do not run destructive shell commands, do not modify ~/.claude, and use TMPDIR for scratch files.}"
+subagent_prompt="${CLAUDE_SUBAGENT_SYSTEM_PROMPT:-Keep commands conservative: do not run destructive shell commands, do not modify ~/.claude, and use TMPDIR for scratch files. Never use dangerouslyDisableSandbox; if a sandboxed Bash command cannot start, report the sandbox failure instead.}"
 
 if [[ "${SUBAGENT_SUPERVISOR_INHERITED_SANDBOX:-}" == "1" ]] ||
   [[ "${CODEX_SANDBOX:-}" == "seatbelt" ]] ||
   [[ "${CODEX_SHELL:-}" == "1" ]]; then
   export SUBAGENT_SUPERVISOR_INHERITED_SANDBOX=1
-
-  inherited_sandbox_prompt="This subagent is already running inside an inherited parent sandbox. For Bash tool calls only, include dangerouslyDisableSandbox: true to avoid nested macOS sandbox-exec failure. This does not remove the inherited parent sandbox. Do not use that flag when SUBAGENT_SUPERVISOR_INHERITED_SANDBOX is not set."
-  subagent_prompt="${inherited_sandbox_prompt} ${subagent_prompt}"
 fi
 
 add_dirs=()
@@ -19,8 +16,40 @@ settings_args=()
 
 tmp_root="${TMPDIR:-/tmp}"
 config_dir="${CLAUDE_SUBAGENT_CONFIG_DIR:-${tmp_root%/}/subagent-supervisor/claude-config}"
-mkdir -p "$config_dir/session-env" "$config_dir/debug"
+mkdir -p "$config_dir/session-env" "$config_dir/debug" "$config_dir/agents"
 export CLAUDE_CONFIG_DIR="$config_dir"
+
+cwd_dir="$(pwd -P)"
+add_dirs+=(--add-dir "$cwd_dir")
+
+json_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+runtime_settings="$config_dir/subagent-settings.json"
+{
+  printf '{\n'
+  printf '  "sandbox": {\n'
+  printf '    "enabled": true,\n'
+  printf '    "failIfUnavailable": true,\n'
+  printf '    "autoAllowBashIfSandboxed": true,\n'
+  printf '    "allowUnsandboxedCommands": false,\n'
+  printf '    "filesystem": {\n'
+  printf '      "allowWrite": [%s, %s, "/tmp", "/private/tmp"],\n' "$(json_string "$cwd_dir")" "$(json_string "$tmp_root")"
+  printf '      "denyWrite": [\n'
+  printf '        "%s/.git/**",\n' "$cwd_dir"
+  printf '        "%s/.claude/settings*.json",\n' "$cwd_dir"
+  printf '        "%s/.claude/skills/**",\n' "$cwd_dir"
+  printf '        "%s/.claude/hooks/**"\n' "$cwd_dir"
+  printf '      ]\n'
+  printf '    }\n'
+  printf '  }\n'
+  printf '}\n'
+} >"$runtime_settings"
+settings_args+=(--settings "$runtime_settings")
 
 if [[ -n "${TMPDIR:-}" ]]; then
   add_dirs+=(--add-dir "$TMPDIR")
@@ -28,10 +57,12 @@ fi
 
 if [[ -n "${HOME:-}" ]]; then
   if [[ -f "$HOME/.claude/settings.json" ]]; then
-    settings_args+=(--settings "$HOME/.claude/settings.json")
+    cp "$HOME/.claude/settings.json" "$config_dir/settings.json"
   fi
 
-  add_dirs+=(--add-dir "$HOME/.claude/session-env" --add-dir "$HOME/.claude/debug")
+  if [[ -d "$HOME/.claude/agents" ]]; then
+    find "$HOME/.claude/agents" -maxdepth 1 -type f -name '*.md' -exec cp {} "$config_dir/agents/" \;
+  fi
 fi
 
 agent_name=""
@@ -40,9 +71,20 @@ if [[ "${1:-}" == "--agent" ]]; then
   shift 2
 fi
 
+resume_session=""
+if [[ "${1:-}" == "--resume" ]]; then
+  resume_session="$2"
+  shift 2
+fi
+
 agent_args=()
 if [[ -n "$agent_name" ]]; then
   agent_args=(--agent "$agent_name")
+fi
+
+resume_args=()
+if [[ -n "$resume_session" ]]; then
+  resume_args=(--resume "$resume_session" --fork-session)
 fi
 
 user_prompt="$*"
@@ -63,5 +105,6 @@ exec claude -p \
   --include-partial-messages \
   --verbose \
   --no-session-persistence \
+  "${resume_args[@]}" \
   "${agent_args[@]}" \
   "$prompt"

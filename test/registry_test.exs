@@ -28,6 +28,21 @@ defmodule SubagentSupervisor.RegistryTest do
     assert finished.output == "hello"
   end
 
+  test "start_job confirms accepted observable jobs" do
+    assert {:ok, job} =
+             SubagentSupervisor.Registry.start_job(%{
+               "owner" => "accepted-test",
+               "command" => "bash -c 'printf accepted'",
+               "cwd" => File.cwd!()
+             })
+
+    assert job.accepted == true
+    assert job.observable == true
+    assert {:ok, found} = SubagentSupervisor.Registry.show(job.id)
+    assert found.accepted == true
+    assert found.observable == true
+  end
+
   test "wait any returns the first completed job for an owner" do
     assert {:ok, _slow} =
              SubagentSupervisor.Registry.start_job(%{
@@ -509,6 +524,134 @@ defmodule SubagentSupervisor.RegistryTest do
     end
   end
 
+  describe "session_id storage" do
+    test "session_id is nil on newly created jobs" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "session-test",
+                 "command" => "bash -c 'printf hello'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert job.session_id == nil
+    end
+
+    test "session_id is extracted from stream-json output on completion" do
+      # Use a bash command that produces JSON output with a session_id
+      json_line =
+        Jason.encode!(%{
+          "type" => "system",
+          "subtype" => "init",
+          "session_id" => "test-session-123"
+        })
+
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "session-extract",
+                 "command" => "bash -c 'printf #{shell_escape(json_line)}'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("session-extract", [job.id], :all, 5_000)
+
+      assert finished.session_id == "test-session-123"
+    end
+
+    test "public_job includes session_id" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "pub-session",
+                 "command" => "bash -c 'printf hello'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("pub-session", [job.id], :all, 5_000)
+
+      assert Map.has_key?(finished, :session_id)
+    end
+  end
+
+  describe "register" do
+    test "creates a job with registered status and session_id" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.register(%{
+                 "owner" => "register-test",
+                 "session_id" => "abc-123-def",
+                 "cwd" => File.cwd!()
+               })
+
+      assert job.status == :registered
+      assert job.session_id == "abc-123-def"
+      assert job.owner == "register-test"
+      assert job.command == nil
+    end
+
+    test "registered job appears in list" do
+      SubagentSupervisor.Registry.register(%{
+        "owner" => "register-list",
+        "session_id" => "list-session-id",
+        "label" => "planner",
+        "cwd" => File.cwd!()
+      })
+
+      assert {:ok, jobs} = SubagentSupervisor.Registry.list("register-list")
+      assert length(jobs) == 1
+      assert hd(jobs).status == :registered
+      assert hd(jobs).session_id == "list-session-id"
+      assert hd(jobs).label == "planner"
+    end
+
+    test "registered job is discoverable via show" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.register(%{
+                 "owner" => "register-show",
+                 "session_id" => "show-session-id",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, found} = SubagentSupervisor.Registry.show(job.id)
+      assert found.status == :registered
+      assert found.session_id == "show-session-id"
+    end
+
+    test "registered job is considered terminal for wait" do
+      assert {:ok, _job} =
+               SubagentSupervisor.Registry.register(%{
+                 "owner" => "register-wait",
+                 "session_id" => "wait-session-id",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("register-wait", [], :all, 1_000)
+
+      assert finished.status == :registered
+    end
+
+    test "register raises on missing owner" do
+      assert catch_exit(
+               SubagentSupervisor.Registry.register(%{
+                 "session_id" => "some-id",
+                 "cwd" => File.cwd!()
+               })
+             )
+    end
+
+    test "status includes session_id for registered job" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.register(%{
+                 "owner" => "register-status",
+                 "session_id" => "status-session-id",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, result} = SubagentSupervisor.Registry.status(job.id)
+      assert result.session_id == "status-session-id"
+    end
+  end
+
   defp write_agent(path, frontmatter) do
     fm_lines =
       Enum.map(frontmatter, fn {k, v} -> "#{k}: #{v}" end)
@@ -519,4 +662,10 @@ defmodule SubagentSupervisor.RegistryTest do
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)
+
+  defp shell_escape(str) do
+    str
+    |> String.replace("'", "'\\''")
+    |> then(&"'#{&1}'")
+  end
 end

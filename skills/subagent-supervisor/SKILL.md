@@ -50,23 +50,22 @@ The agent name is validated at both the CLI and daemon level — an unknown agen
 
 ## Default Sandbox Profile
 
-Prefer a sandbox profile that allows repository edits, the agent's dynamic temp directory, and Claude shell session setup, while keeping git internals and agent configuration protected.
+Prefer a sandbox profile that allows repository edits and the agent's dynamic temp directory while keeping git internals and agent configuration protected. Do not permit unsandboxed Bash commands or the `dangerouslyDisableSandbox` escape hatch for supervised subagents.
 
-When a subagent inherits a parent sandbox such as Codex's macOS seatbelt sandbox, Bash tool calls may need `dangerouslyDisableSandbox: true` to avoid nested `sandbox-exec` failure. Only use that workaround when `SUBAGENT_SUPERVISOR_INHERITED_SANDBOX=1`; otherwise let Claude Code apply its own sandbox normally.
+If an inherited parent sandbox causes nested Bash sandbox initialization to fail, keep the failure closed: report Bash/Python as unavailable for that job rather than disabling or weakening the sandbox.
 
 Do not hardcode observed temp paths; resolve the effective temp root from `$TMPDIR`, `System.tmp_dir!()`, or `mktemp -d` for the current job.
 
 ```yaml
 sandbox:
   inheritedParent: "$SUBAGENT_SUPERVISOR_INHERITED_SANDBOX"
-  useClaudeCodeSandboxWhenNoParent: true
-  disableNestedBashSandboxOnlyWhenInherited: true
+  enabled: true
+  failIfUnavailable: true
+  allowUnsandboxedCommands: false
 write:
   allowOnly:
     - "."
     - "$TMPDIR"
-    - "$HOME/.claude/session-env/"
-    - "$HOME/.claude/debug"
   denyWithinAllow:
     - "*/.claude/settings*.json"
     - "*/.claude/skills"
@@ -78,9 +77,17 @@ write:
 
 Claude's effective config dir must have a writable `session-env/` directory; when launching subagents, prefer setting `CLAUDE_CONFIG_DIR` under `$TMPDIR` instead of requiring broad writes to `$HOME/.claude`.
 
-## Wake Rules
+## Start Handoff
 
-Use `wait` to block until the daemon can return completed results:
+`start` returns only after launcher validation succeeds and the daemon has registered an observable job. Treat `accepted: true` and `observable: true` in the returned JSON as the positive handoff confirmation that the job id can be listed, shown, tailed, or waited on.
+
+The returned `status` can be `queued` when the daemon owns the job but all concurrency slots are occupied, or `running` when the subprocess has already been started. Do not block merely to turn `queued` into `running`; use the returned job id/session for follow-up.
+
+For Codex parent agents that need to yield after dispatch, create a thread heartbeat or equivalent runtime wake mechanism after the start handoff is confirmed. The heartbeat prompt should include the session id and job ids, then inspect `list`, `status`, `show --full`, or `wait` when it resumes.
+
+## Wait Rules
+
+Use `wait` when the parent agent is staying active in the current turn and can consume the result immediately. `wait` is a daemon-side readiness primitive, not by itself a reliable wake mechanism after the parent runtime has yielded or finalized.
 
 ```bash
 subagent-supervisor wait --session "$SUBAGENT_SUPERVISOR_SESSION" --mode any --timeout 3600
@@ -88,9 +95,11 @@ subagent-supervisor wait --session "$SUBAGENT_SUPERVISOR_SESSION" --mode all --t
 subagent-supervisor wait --session "$SUBAGENT_SUPERVISOR_SESSION" --ids job_a,job_b --mode all --timeout 7200
 ```
 
-Choose `--mode any` when the master agent can make progress from the first returned result, such as reviewing an exploratory finding or starting integration on an independent slice.
+Choose `--mode any` with a long timeout when the active parent can resume from the first returned result, such as reviewing an exploratory finding or starting integration on an independent slice.
 
-Choose `--mode all` when the next step depends on comparing, merging, or summarizing the whole batch.
+Choose `--mode all` with a long timeout when the active parent depends on comparing, merging, or summarizing the whole batch.
+
+Use `--ids` whenever only a subset of dispatched jobs should wake the parent. On timeout, inspect with `list`, `status`, or `tail`, then issue another `wait` rather than switching to manual sleeps.
 
 ## Inspect
 
@@ -128,6 +137,7 @@ subagent-supervisor top
 
 1. Keep decomposition in the master agent. Create bounded prompts with explicit expected output.
 2. Start only as many subprocesses as the concurrency budget allows.
-3. Wait with `any` or `all` based on the next useful decision point.
-4. Treat subprocess output as evidence, not authority. Review changed files and commands before integrating.
-5. Report final status from the master agent after verification.
+3. After each `start`, preserve the accepted job id and session. If the parent must yield, schedule a runtime wake/heartbeat for those ids.
+4. Wait with `any` or `all` only when the parent remains active and the next useful decision point is inside the current turn.
+5. Treat subprocess output as evidence, not authority. Review changed files and commands before integrating.
+6. Report final status from the master agent after verification.

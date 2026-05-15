@@ -75,6 +75,23 @@ defmodule SubagentSupervisor.StreamJSON do
   end
 
   @doc """
+  Extracts the session_id from the first `system` event in a stream-json capture.
+
+  Returns `nil` when no system event with a session_id is found.
+  """
+  @spec extract_session_id(String.t()) :: String.t() | nil
+  def extract_session_id(content) when is_binary(content) do
+    content
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case Jason.decode(line) do
+        {:ok, %{"type" => "system", "session_id" => sid}} when is_binary(sid) -> sid
+        _ -> nil
+      end
+    end)
+  end
+
+  @doc """
   Formats the full stream-json capture into a verbose, filtered summary.
 
   Whitelist — only these event types are rendered:

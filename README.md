@@ -35,7 +35,12 @@ For an installable tool that can be run from any repository and supports the `to
 scripts/package
 ```
 
-This installs to `~/.local/subagent-supervisor` and symlinks the wrapper to `~/.local/bin` if it exists. Add `~/.local/subagent-supervisor/bin` to `PATH`, or ensure `~/.local/bin` is on your PATH.
+This installs to `~/.local/subagent-supervisor` and symlinks the wrapper to `~/.local/bin`. Ensure `~/.local/bin` is on your PATH.
+
+The package script fetches Mix dependencies, builds the release, installs the
+`subagent-supervisor` and `claude-subagent` wrappers, and copies project Claude
+agents from `.claude/agents/*.md` to `~/.claude/agents/` so `--agent` names such
+as `sweng-coder` are available from any repository.
 
 The release package includes the native `ex_termbox` NIF on disk, which is required for `subagent-supervisor top`. Escripts cannot load that NIF from inside the escript archive, so the development escript falls back to `mix run` when it lives beside this source checkout.
 
@@ -82,9 +87,15 @@ Optional flags:
 
 The prompt text follows `--`. The supervisor automatically wraps it in `scripts/claude-subagent`. Only `claude-subagent` is allowed as a launcher — raw bash commands are rejected.
 
-Output is JSON with `id`, `status`, `owner`, `label`, `command`, and timestamps.
+`start` returns only after launcher validation has passed and the daemon has durably registered the job. The returned `id` is immediately observable with `list`, `show`, `status`, `tail`, and `wait`. The returned `status` may be `running` when a concurrency slot was available, or `queued` when the daemon owns the job but it is waiting behind other work.
+
+Output is JSON with `id`, `accepted`, `observable`, `status`, `owner`, `label`, `command`, and timestamps. Callers that need to yield after dispatch should treat `accepted: true` and `observable: true` as the positive handoff confirmation, then schedule their runtime's wake/follow-up mechanism against the returned session or job ids.
 
 ### Wait for results
+
+`wait` is the daemon-side readiness primitive for an active caller. Use it when the parent process is going to remain alive and consume the result in the same turn.
+
+Do not rely on a long-running `wait` call as the only wake mechanism for runtimes that may yield or finalize the parent turn while subprocesses continue. For Codex-style callers, dispatch jobs, confirm `accepted: true`, schedule a thread heartbeat or equivalent wake mechanism for the returned session/job ids, and let that follow-up inspect completed jobs.
 
 ```bash
 # Block until ALL jobs for the owner are done
@@ -101,6 +112,8 @@ subagent-supervisor wait --session my-thread-abc123 --ids job_a,job_b --mode all
 - `--timeout` — seconds to wait before returning `{:error, :timeout}` (default: 86400)
 - `--ids` — comma-separated job ids to wait on (alternative to owner-based selection)
 - `--session`, `--owner`, or `--ids` is required
+
+Use `--mode any` when the active parent can act on the first completed subagent, `--mode all` when it needs the full batch, and `--ids` when only specific jobs should return from that blocking wait. If a wait times out, inspect job state and wait again rather than replacing the daemon wait with ad hoc sleeps.
 
 ### List jobs
 

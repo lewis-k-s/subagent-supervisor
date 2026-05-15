@@ -611,6 +611,48 @@ defmodule SubagentSupervisor.StreamJSONTest do
     end
   end
 
+  describe "extract_session_id/1" do
+    test "extracts session_id from system event" do
+      stream =
+        json_lines([
+          %{
+            "type" => "system",
+            "subtype" => "init",
+            "session_id" => "e38e90db-3e4f-4834-a1ae-7923450a6db5"
+          },
+          %{"type" => "result", "result" => "done"}
+        ])
+
+      assert StreamJSON.extract_session_id(stream) == "e38e90db-3e4f-4834-a1ae-7923450a6db5"
+    end
+
+    test "returns nil when no system event with session_id" do
+      stream =
+        json_lines([
+          %{"type" => "result", "result" => "done"}
+        ])
+
+      assert StreamJSON.extract_session_id(stream) == nil
+    end
+
+    test "returns nil for empty string" do
+      assert StreamJSON.extract_session_id("") == nil
+    end
+
+    test "returns nil for non-JSON content" do
+      assert StreamJSON.extract_session_id("not json at all") == nil
+    end
+
+    test "returns nil when system event has no session_id" do
+      stream =
+        json_lines([
+          %{"type" => "system", "subtype" => "init"}
+        ])
+
+      assert StreamJSON.extract_session_id(stream) == nil
+    end
+  end
+
   defp json_lines(objects) do
     objects
     |> Enum.map(&Jason.encode!/1)

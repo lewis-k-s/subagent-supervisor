@@ -15,6 +15,7 @@ defmodule SubagentSupervisor.Job do
     :exit_status,
     :output,
     :output_path,
+    :session_id,
     :task_ref,
     :inserted_at,
     :started_at,

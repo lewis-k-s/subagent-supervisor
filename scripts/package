@@ -6,8 +6,13 @@ INSTALL_DIR=${1:-"$HOME/.local/subagent-supervisor"}
 RELEASE_DIR="$INSTALL_DIR/libexec/subagent_supervisor"
 WRAPPER_DIR="$INSTALL_DIR/bin"
 WRAPPER="$WRAPPER_DIR/subagent-supervisor"
+LINK_DIR="$HOME/.local/bin"
+GLOBAL_AGENTS_DIR=${CLAUDE_AGENTS_DIR:-"$HOME/.claude/agents"}
+GLOBAL_CODEX_SKILLS_DIR=${CODEX_SKILLS_DIR:-"$HOME/.codex/skills"}
+GLOBAL_CODEX_SKILL_DIR="$GLOBAL_CODEX_SKILLS_DIR/subagent-supervisor"
 
 cd "$ROOT"
+mix deps.get
 MIX_ENV=prod mix release --overwrite --path "$RELEASE_DIR"
 
 mkdir -p "$WRAPPER_DIR"
@@ -39,12 +44,39 @@ chmod +x "$WRAPPER"
 cp "$ROOT/scripts/claude-subagent" "$WRAPPER_DIR/claude-subagent"
 chmod +x "$WRAPPER_DIR/claude-subagent"
 
-LINK_DIR="$HOME/.local/bin"
-if [ -d "$LINK_DIR" ] && [ "$WRAPPER_DIR" != "$LINK_DIR" ]; then
+mkdir -p "$LINK_DIR"
+if [ "$WRAPPER_DIR" != "$LINK_DIR" ]; then
   ln -sf "$WRAPPER" "$LINK_DIR/subagent-supervisor"
   ln -sf "$WRAPPER_DIR/claude-subagent" "$LINK_DIR/claude-subagent"
   printf 'Symlinked to %s\n' "$LINK_DIR"
 fi
 
+if [ -d "$ROOT/.claude/agents" ]; then
+  mkdir -p "$GLOBAL_AGENTS_DIR"
+
+  for agent in "$ROOT"/.claude/agents/*.md; do
+    [ -f "$agent" ] || continue
+    cp "$agent" "$GLOBAL_AGENTS_DIR/"
+  done
+
+  printf 'Installed Claude agents to %s\n' "$GLOBAL_AGENTS_DIR"
+fi
+
+if [ -d "$ROOT/skills/subagent-supervisor" ]; then
+  mkdir -p "$GLOBAL_CODEX_SKILLS_DIR"
+
+  if [ -L "$GLOBAL_CODEX_SKILL_DIR" ]; then
+    rm "$GLOBAL_CODEX_SKILL_DIR"
+  fi
+
+  mkdir -p "$GLOBAL_CODEX_SKILL_DIR"
+  cp -R "$ROOT/skills/subagent-supervisor/." "$GLOBAL_CODEX_SKILL_DIR/"
+
+  printf 'Installed Codex skill to %s\n' "$GLOBAL_CODEX_SKILL_DIR"
+fi
+
 printf 'Packaged subagent-supervisor at %s\n' "$INSTALL_DIR"
-printf 'Add %s to PATH\n' "$WRAPPER_DIR"
+case ":$PATH:" in
+  *":$LINK_DIR:"*) ;;
+  *) printf 'Add %s to PATH: export PATH="%s:$PATH"\n' "$LINK_DIR" "$LINK_DIR" ;;
+esac

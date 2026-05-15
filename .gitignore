@@ -5,7 +5,9 @@
 /subagent-supervisor
 /.cache/
 /.elixir_ls/
-/.claude/
+/.claude/*
+!/.claude/agents/
+!/.claude/agents/*.md
 /.venv/
 /.venv39/
 /pyproject.toml

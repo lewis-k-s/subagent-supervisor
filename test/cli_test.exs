@@ -109,6 +109,9 @@ defmodule SubagentSupervisor.CLITest do
       assert output =~ "subagent-supervisor start"
       assert output =~ "subagent-supervisor agents"
       assert output =~ "--agent"
+      assert output =~ "subagent-supervisor register"
+      assert output =~ "--resume-session"
+      assert output =~ "--resume-job"
     end
   end
 
@@ -134,6 +137,54 @@ defmodule SubagentSupervisor.CLITest do
       output = capture_io(fn -> SubagentSupervisor.CLI.main(["agents"]) end)
       assert output =~ "cli-test"
       assert output =~ "CLI test agent"
+    end
+  end
+
+  describe "discover_session_id/1" do
+    test "finds most recently modified .jsonl file" do
+      tmp = Path.join(System.tmp_dir!(), "cli-session-test-#{System.unique_integer([:positive])}")
+      user_home = Path.join(tmp, "home")
+      project_dir = Path.join([user_home, ".claude", "projects", "-Volumes-tmp-myproject"])
+      File.mkdir_p!(project_dir)
+
+      # Create two session files
+      File.write!(Path.join(project_dir, "older-session.jsonl"), "old")
+      Process.sleep(10)
+      File.write!(Path.join(project_dir, "newer-session.jsonl"), "new")
+
+      old_home = System.get_env("HOME")
+      System.put_env("HOME", user_home)
+
+      on_exit(fn ->
+        restore_env("HOME", old_home)
+        File.rm_rf!(tmp)
+      end)
+
+      result = SubagentSupervisor.CLI.discover_session_id("/Volumes/tmp/myproject")
+      assert result == "newer-session"
+    end
+
+    test "returns nil when no .jsonl files exist" do
+      tmp = Path.join(System.tmp_dir!(), "cli-session-test-#{System.unique_integer([:positive])}")
+      user_home = Path.join(tmp, "home")
+      project_dir = Path.join([user_home, ".claude", "projects", "-empty-project"])
+      File.mkdir_p!(project_dir)
+
+      old_home = System.get_env("HOME")
+      System.put_env("HOME", user_home)
+
+      on_exit(fn ->
+        restore_env("HOME", old_home)
+        File.rm_rf!(tmp)
+      end)
+
+      result = SubagentSupervisor.CLI.discover_session_id("/empty/project")
+      assert result == nil
+    end
+
+    test "returns nil when project directory does not exist" do
+      result = SubagentSupervisor.CLI.discover_session_id("/nonexistent/path/that/does/not/exist")
+      assert result == nil
     end
   end
 

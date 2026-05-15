@@ -96,6 +96,20 @@ defmodule SubagentSupervisor.Registry do
   end
 
   @doc """
+  Registers an external Claude session as a synthetic job.
+
+  Creates a job with `:registered` status representing a session managed
+  outside the supervisor. Required attributes: `"owner"`, `"session_id"`.
+  Optional attributes: `"label"`, `"cwd"`.
+
+  Returns `{:ok, job_map}` on success.
+  """
+  @spec register(map()) :: {:ok, map()} | no_return()
+  def register(attrs) when is_map(attrs) do
+    GenServer.call(__MODULE__, {:register, attrs})
+  end
+
+  @doc """
   Reads the stream-json capture for a job, formatting it according to `mode`.
 
   Modes:
@@ -163,6 +177,7 @@ defmodule SubagentSupervisor.Registry do
       cwd: cwd,
       label: label,
       agent: agent,
+      session_id: Map.get(attrs, "session_id"),
       status: :queued,
       inserted_at: inserted_at,
       started_at: nil
@@ -325,6 +340,31 @@ defmodule SubagentSupervisor.Registry do
     {:reply, reply, state}
   end
 
+  def handle_call({:register, attrs}, _from, state) do
+    owner = required!(attrs, "owner")
+    session_id = Map.get(attrs, "session_id")
+    cwd = Map.get(attrs, "cwd", File.cwd!())
+    label = Map.get(attrs, "label")
+    id = Map.get(attrs, "id", new_id())
+    inserted_at = now()
+
+    job = %Job{
+      id: id,
+      owner: owner,
+      command: nil,
+      cwd: cwd,
+      label: label,
+      agent: nil,
+      session_id: session_id,
+      status: :registered,
+      inserted_at: inserted_at,
+      started_at: nil
+    }
+
+    state = put_job(state, job)
+    {:reply, {:ok, public_job(Map.fetch!(state.jobs, id))}, state}
+  end
+
   @impl true
   def handle_info({ref, {id, started_at, finished_at, exit_status}}, state) do
     Process.demonitor(ref, [:flush])
@@ -339,12 +379,14 @@ defmodule SubagentSupervisor.Registry do
           end
 
         output = StreamJSON.extract_text(raw)
+        session_id = StreamJSON.extract_session_id(raw)
 
         %{
           job
           | status: terminal_status(exit_status),
             exit_status: exit_status,
             output: output,
+            session_id: session_id,
             started_at: started_at,
             finished_at: finished_at,
             task_ref: nil
@@ -538,7 +580,7 @@ defmodule SubagentSupervisor.Registry do
   end
 
   defp normalize_selector(owner, ids), do: %{owner: owner, ids: ids || []}
-  defp terminal?(%Job{status: status}), do: status in [:succeeded, :failed]
+  defp terminal?(%Job{status: status}), do: status in [:succeeded, :failed, :registered]
   defp terminal_status(0), do: :succeeded
   defp terminal_status(_), do: :failed
   defp sort_jobs(jobs), do: Enum.sort_by(jobs, &DateTime.to_unix(&1.inserted_at, :microsecond))
@@ -551,6 +593,9 @@ defmodule SubagentSupervisor.Registry do
       agent: job.agent,
       command: job.command,
       cwd: job.cwd,
+      session_id: job.session_id,
+      accepted: true,
+      observable: true,
       status: job.status,
       exit_status: job.exit_status,
       inserted_at: job.inserted_at,
@@ -586,6 +631,7 @@ defmodule SubagentSupervisor.Registry do
       label: job.label,
       status: job.status,
       owner: job.owner,
+      session_id: job.session_id,
       started_at: job.started_at,
       finished_at: job.finished_at,
       output_digest: output_digest
