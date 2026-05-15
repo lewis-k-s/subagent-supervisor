@@ -52,8 +52,15 @@ defmodule SubagentSupervisor.Top.Model do
             fetch_state(model)
           end
 
-        if model.view_mode == :output and model.selected_job_id do
-          fetch_output(model)
+        model =
+          if model.view_mode == :output and model.selected_job_id do
+            fetch_output(model)
+          else
+            model
+          end
+
+        if model.flash_until && DateTime.compare(model.flash_until, DateTime.utc_now()) != :gt do
+          %{model | flash_until: nil, flash_index: nil}
         else
           model
         end
@@ -77,6 +84,13 @@ defmodule SubagentSupervisor.Top.Model do
           model
         end
 
+      {:event, %{ch: ?C}} ->
+        if model.view_mode == :dashboard do
+          handle_copy(model)
+        else
+          model
+        end
+
       {:event, %{key: @key_esc}} ->
         if model.view_mode == :output do
           %{
@@ -93,23 +107,26 @@ defmodule SubagentSupervisor.Top.Model do
         end
 
       {:event, %{key: @key_enter}} ->
-        if model.view_mode == :dashboard and model.total_jobs > 0 do
-          job = Enum.at(model.all_jobs, model.selected_index)
+        if model.view_mode == :dashboard do
+          case Enum.at(model.navigable_rows, model.selected_index) do
+            {:job, job} ->
+              model = %{
+                model
+                | view_mode: :output,
+                  selected_job_id: job.id,
+                  output_scroll: 0,
+                  output_auto_scroll: true,
+                  output_byte_offset: 0,
+                  selected_job_output: []
+              }
 
-          if job do
-            model = %{
+              fetch_output(model)
+
+            {:owner, _} ->
               model
-              | view_mode: :output,
-                selected_job_id: job.id,
-                output_scroll: 0,
-                output_auto_scroll: true,
-                output_byte_offset: 0,
-                selected_job_output: []
-            }
 
-            fetch_output(model)
-          else
-            model
+            nil ->
+              model
           end
         else
           model
@@ -150,7 +167,7 @@ defmodule SubagentSupervisor.Top.Model do
   end
 
   defp handle_arrow_down(%{view_mode: :dashboard} = model) do
-    max_idx = max(model.total_jobs - 1, 0)
+    max_idx = max(length(model.navigable_rows) - 1, 0)
     %{model | selected_index: min(model.selected_index + 1, max_idx)}
   end
 
@@ -175,7 +192,7 @@ defmodule SubagentSupervisor.Top.Model do
 
   defp handle_page_down(%{view_mode: :dashboard} = model) do
     page = dashboard_visible_jobs(model)
-    max_idx = max(model.total_jobs - 1, 0)
+    max_idx = max(length(model.navigable_rows) - 1, 0)
     %{model | selected_index: min(model.selected_index + page, max_idx)}
   end
 
@@ -192,7 +209,7 @@ defmodule SubagentSupervisor.Top.Model do
   end
 
   defp handle_end(%{view_mode: :dashboard} = model) do
-    %{model | selected_index: max(model.total_jobs - 1, 0)}
+    %{model | selected_index: max(length(model.navigable_rows) - 1, 0)}
   end
 
   defp fetch_state(%Top{} = model) do
@@ -201,6 +218,15 @@ defmodule SubagentSupervisor.Top.Model do
         all_jobs =
           data.jobs_by_owner
           |> Enum.flat_map(& &1.jobs)
+
+        navigable_rows =
+          data.jobs_by_owner
+          |> Enum.flat_map(fn group ->
+            [{:owner, group.owner}] ++ Enum.map(group.jobs, &{:job, &1})
+          end)
+
+        max_nav = max(length(navigable_rows) - 1, 0)
+        clamped = min(model.selected_index, max_nav)
 
         %Top{
           model
@@ -212,6 +238,8 @@ defmodule SubagentSupervisor.Top.Model do
             queued: data.queued,
             max_concurrency: data.max_concurrency,
             supervision_tree: data.supervision_tree,
+            navigable_rows: navigable_rows,
+            selected_index: clamped,
             error: nil
         }
 
@@ -322,5 +350,34 @@ defmodule SubagentSupervisor.Top.Model do
     Enum.reduce(tree, 0, fn node, acc ->
       acc + 1 + count_tree_nodes(Map.get(node, :children, []))
     end)
+  end
+
+  defp handle_copy(model) do
+    case Enum.at(model.navigable_rows, model.selected_index) do
+      {:job, job} ->
+        copy_to_clipboard(job.id)
+        set_flash(model)
+
+      {:owner, owner} ->
+        copy_to_clipboard(owner)
+        set_flash(model)
+
+      nil ->
+        model
+    end
+  end
+
+  defp copy_to_clipboard(text) do
+    port = Port.open({:spawn, "pbcopy"}, [:binary])
+    Port.command(port, text)
+    Port.close(port)
+  end
+
+  defp set_flash(model) do
+    %{
+      model
+      | flash_until: DateTime.utc_now() |> DateTime.add(1, :second),
+        flash_index: model.selected_index
+    }
   end
 end

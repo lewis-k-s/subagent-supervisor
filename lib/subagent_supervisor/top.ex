@@ -32,6 +32,9 @@ defmodule SubagentSupervisor.Top do
     output_scroll: 0,
     output_auto_scroll: true,
     output_byte_offset: 0,
+    navigable_rows: [],
+    flash_until: nil,
+    flash_index: nil,
     error: nil
   ]
 

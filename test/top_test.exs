@@ -170,24 +170,72 @@ defmodule SubagentSupervisor.TopTest do
 
   describe "update/2 - dashboard navigation" do
     test "arrow up decrements selected_index with floor at 0" do
-      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 0, total_jobs: 3}
+      rows = [{:owner, "a"}, {:job, %{id: "j1"}}, {:owner, "b"}, {:job, %{id: "j2"}}]
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 0,
+        navigable_rows: rows
+      }
+
       assert Top.update(model, {:event, %{key: key(:arrow_up)}}).selected_index == 0
 
-      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 3, total_jobs: 5}
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 3,
+        navigable_rows: rows
+      }
+
       assert Top.update(model, {:event, %{key: key(:arrow_up)}}).selected_index == 2
     end
 
-    test "arrow down increments selected_index capped at total - 1" do
-      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 2, total_jobs: 5}
+    test "arrow down increments selected_index capped at navigable_rows - 1" do
+      rows = [{:owner, "a"}, {:job, %{id: "j1"}}, {:owner, "b"}, {:job, %{id: "j2"}}]
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 2,
+        navigable_rows: rows
+      }
+
       assert Top.update(model, {:event, %{key: key(:arrow_down)}}).selected_index == 3
 
-      model = %Top{daemon: :ignored, view_mode: :dashboard, selected_index: 4, total_jobs: 5}
-      assert Top.update(model, {:event, %{key: key(:arrow_down)}}).selected_index == 4
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 3,
+        navigable_rows: rows
+      }
+
+      assert Top.update(model, {:event, %{key: key(:arrow_down)}}).selected_index == 3
     end
 
     test "q halts in dashboard mode" do
       model = %Top{daemon: :ignored, view_mode: :dashboard}
       assert catch_exit(Top.update(model, {:event, %{ch: ?q}}))
+    end
+
+    test "navigation moves across owner and job rows" do
+      rows = [{:owner, "a"}, {:job, %{id: "j1"}}, {:owner, "b"}, {:job, %{id: "j2"}}]
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 0,
+        navigable_rows: rows
+      }
+
+      down = Top.update(model, {:event, %{key: key(:arrow_down)}})
+      assert down.selected_index == 1
+
+      down2 = Top.update(down, {:event, %{key: key(:arrow_down)}})
+      assert down2.selected_index == 2
+
+      up = Top.update(down2, {:event, %{key: key(:arrow_up)}})
+      assert up.selected_index == 1
     end
   end
 
@@ -270,7 +318,31 @@ defmodule SubagentSupervisor.TopTest do
   end
 
   describe "update/2 - enter to view output" do
-    test "enter switches to output mode when jobs exist" do
+    test "enter switches to output mode when a job row is selected" do
+      job = %{
+        id: "job_abc123",
+        status: :succeeded,
+        started_at: DateTime.utc_now(),
+        finished_at: DateTime.utc_now(),
+        label: "test",
+        command: "echo hi",
+        inserted_at: DateTime.utc_now()
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 1,
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}]
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:enter)}})
+      assert updated.view_mode == :output
+      assert updated.selected_job_id == "job_abc123"
+    end
+
+    test "enter does nothing when an owner row is selected" do
       job = %{
         id: "job_abc123",
         status: :succeeded,
@@ -285,17 +357,16 @@ defmodule SubagentSupervisor.TopTest do
         daemon: :ignored,
         view_mode: :dashboard,
         selected_index: 0,
-        total_jobs: 1,
-        all_jobs: [job]
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}]
       }
 
       updated = Top.update(model, {:event, %{key: key(:enter)}})
-      assert updated.view_mode == :output
-      assert updated.selected_job_id == "job_abc123"
+      assert updated.view_mode == :dashboard
     end
 
-    test "enter does nothing when no jobs" do
-      model = %Top{daemon: :ignored, view_mode: :dashboard, total_jobs: 0, all_jobs: []}
+    test "enter does nothing when no rows" do
+      model = %Top{daemon: :ignored, view_mode: :dashboard, all_jobs: [], navigable_rows: []}
       updated = Top.update(model, {:event, %{key: key(:enter)}})
       assert updated.view_mode == :dashboard
     end
@@ -333,34 +404,25 @@ defmodule SubagentSupervisor.TopTest do
     test "renders non-empty job rows inside a valid table" do
       now = DateTime.utc_now()
 
+      job = %{
+        id: "job_abcdefgh",
+        status: :succeeded,
+        started_at: now,
+        finished_at: now,
+        label: "hello",
+        command: "echo hello",
+        inserted_at: now
+      }
+
       model = %Top{
         daemon: :ignored,
         total_jobs: 1,
-        all_jobs: [
-          %{
-            id: "job_abcdefgh",
-            status: :succeeded,
-            started_at: now,
-            finished_at: now,
-            label: "hello",
-            command: "echo hello",
-            inserted_at: now
-          }
-        ],
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}],
         jobs_by_owner: [
           %{
             owner: "owner-a",
-            jobs: [
-              %{
-                id: "job_abcdefgh",
-                status: :succeeded,
-                started_at: now,
-                finished_at: now,
-                label: "hello",
-                command: "echo hello",
-                inserted_at: now
-              }
-            ]
+            jobs: [job]
           }
         ]
       }
@@ -376,35 +438,26 @@ defmodule SubagentSupervisor.TopTest do
     test "renders selected job with blue background" do
       now = DateTime.utc_now()
 
+      job = %{
+        id: "job_abcdefgh",
+        status: :succeeded,
+        started_at: now,
+        finished_at: now,
+        label: "hello",
+        command: "echo hello",
+        inserted_at: now
+      }
+
       model = %Top{
         daemon: :ignored,
         total_jobs: 1,
-        selected_index: 0,
-        all_jobs: [
-          %{
-            id: "job_abcdefgh",
-            status: :succeeded,
-            started_at: now,
-            finished_at: now,
-            label: "hello",
-            command: "echo hello",
-            inserted_at: now
-          }
-        ],
+        selected_index: 1,
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}],
         jobs_by_owner: [
           %{
             owner: "owner-a",
-            jobs: [
-              %{
-                id: "job_abcdefgh",
-                status: :succeeded,
-                started_at: now,
-                finished_at: now,
-                label: "hello",
-                command: "echo hello",
-                inserted_at: now
-              }
-            ]
+            jobs: [job]
           }
         ]
       }
@@ -412,6 +465,94 @@ defmodule SubagentSupervisor.TopTest do
       assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
       output = Canvas.render_to_string(canvas)
       assert output =~ "Owner: owner-a"
+    end
+
+    test "renders selected owner header with blue background" do
+      now = DateTime.utc_now()
+
+      job = %{
+        id: "job_abcdefgh",
+        status: :succeeded,
+        started_at: now,
+        finished_at: now,
+        label: "hello",
+        command: "echo hello",
+        inserted_at: now
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        total_jobs: 1,
+        selected_index: 0,
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}],
+        jobs_by_owner: [
+          %{
+            owner: "owner-a",
+            jobs: [job]
+          }
+        ]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Owner: owner-a"
+    end
+  end
+
+  describe "update/2 - C key copy to clipboard" do
+    test "C sets flash fields when a job row is selected" do
+      job = %{id: "job_copy_test", status: :running}
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 1,
+        navigable_rows: [{:owner, "owner-a"}, {:job, job}]
+      }
+
+      updated = Top.update(model, {:event, %{ch: ?C}})
+      assert updated.flash_until != nil
+      assert updated.flash_index == 1
+    end
+
+    test "C sets flash fields when an owner row is selected" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 0,
+        navigable_rows: [{:owner, "owner-a"}]
+      }
+
+      updated = Top.update(model, {:event, %{ch: ?C}})
+      assert updated.flash_until != nil
+      assert updated.flash_index == 0
+    end
+
+    test "C does nothing in output mode" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :output,
+        flash_until: nil,
+        flash_index: nil
+      }
+
+      updated = Top.update(model, {:event, %{ch: ?C}})
+      assert updated.flash_until == nil
+      assert updated.flash_index == nil
+    end
+
+    test "C does nothing when navigable_rows is empty" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 0,
+        navigable_rows: []
+      }
+
+      updated = Top.update(model, {:event, %{ch: ?C}})
+      assert updated.flash_until == nil
+      assert updated.flash_index == nil
     end
   end
 

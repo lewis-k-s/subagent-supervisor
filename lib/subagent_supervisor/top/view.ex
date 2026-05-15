@@ -208,7 +208,7 @@ defmodule SubagentSupervisor.Top.View do
   defp dashboard_bottom_bar do
     bar do
       label(
-        content: " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output",
+        content: " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output | C copy id",
         color: :black,
         background: :white
       )
@@ -242,55 +242,59 @@ defmodule SubagentSupervisor.Top.View do
   end
 
   defp render_jobs(model) do
-    {elements, _idx} =
+    owner_counts =
       model.jobs_by_owner
-      |> Enum.with_index()
-      |> Enum.reduce({[], 0}, fn {owner_group, group_idx}, {acc, job_idx} ->
-        header = owner_header(owner_group.owner, length(owner_group.jobs), group_idx == 0)
+      |> Enum.into(%{}, fn group -> {group.owner, length(group.jobs)} end)
 
-        {rows, next_idx} =
-          owner_job_rows(owner_group.jobs, model.selected_index, job_idx)
+    model.navigable_rows
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {row, idx} ->
+      selected? = idx == model.selected_index
+      flashing? = model.flash_index == idx and model.flash_until != nil
 
-        {acc ++ header ++ rows, next_idx}
-      end)
+      case row do
+        {:owner, owner} ->
+          count = Map.get(owner_counts, owner, 0)
+          [render_owner_header(owner, count, selected?, flashing?)]
 
-    elements
+        {:job, job} ->
+          [render_job_row(job, selected?, flashing?)]
+      end
+    end)
   end
 
-  defp owner_header(owner, count, first?) do
-    spacer =
-      if first?,
-        do: [],
-        else: [label(content: "")]
+  defp render_owner_header(owner, count, selected?, flashing?) do
+    text = "Owner: #{owner} (#{count} jobs)"
 
-    spacer ++
-      [label(content: "Owner: #{owner} (#{count} jobs)", color: :magenta)]
+    cond do
+      flashing? ->
+        bg = flash_background()
+        label(content: text, color: :white, background: bg)
+
+      selected? ->
+        label(content: text, color: :white, background: :blue)
+
+      true ->
+        label(content: text, color: :magenta)
+    end
   end
 
-  defp owner_job_rows(jobs, selected_index, start_idx) do
-    {rows, next_idx} =
-      jobs
-      |> Enum.with_index()
-      |> Enum.map(fn {job, i} ->
-        global_idx = start_idx + i
-        selected? = global_idx == selected_index
+  defp render_job_row(job, selected?, flashing?) do
+    cond do
+      flashing? ->
+        bg = flash_background()
+        label(content: job_line(job), color: Format.status_color(job.status), background: bg)
 
-        row =
-          if selected? do
-            label(
-              content: job_line(job),
-              color: Format.status_color(job.status),
-              background: :blue
-            )
-          else
-            label(content: job_line(job), color: Format.status_color(job.status))
-          end
+      selected? ->
+        label(content: job_line(job), color: Format.status_color(job.status), background: :blue)
 
-        {row, global_idx}
-      end)
-      |> Enum.unzip()
+      true ->
+        label(content: job_line(job), color: Format.status_color(job.status))
+    end
+  end
 
-    {rows, (List.first(next_idx) || start_idx) + length(jobs)}
+  defp flash_background do
+    if rem(System.system_time(:millisecond), 500) < 250, do: :blue, else: :cyan
   end
 
   defp job_line(job) do
