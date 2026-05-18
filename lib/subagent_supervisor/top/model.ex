@@ -117,6 +117,13 @@ defmodule SubagentSupervisor.Top.Model do
       {:event, %{key: @key_enter}} ->
         if model.view_mode == :dashboard do
           case Enum.at(model.navigable_rows, model.selected_index) do
+            {:job, %{status: :registered} = job} ->
+              %{
+                model
+                | view_mode: :session_detail,
+                  selected_job_id: job.id
+              }
+
             {:job, job} ->
               model = %{
                 model

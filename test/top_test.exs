@@ -46,14 +46,19 @@ defmodule SubagentSupervisor.TopTest do
     test "returns cross for failed" do
       assert Top.status_icon(:failed) == "\u2717"
     end
+
+    test "returns fisheye for registered" do
+      assert Top.status_icon(:registered) == "\u25C9"
+    end
   end
 
   describe "status_color/1" do
     test "maps statuses to colors" do
       assert Top.status_color(:running) == :yellow
-      assert Top.status_color(:queued) == :white
+      assert Top.status_color(:queued) == :black
       assert Top.status_color(:succeeded) == :green
       assert Top.status_color(:failed) == :red
+      assert Top.status_color(:registered) == :magenta
     end
 
     test "defaults to white" do
@@ -112,6 +117,19 @@ defmodule SubagentSupervisor.TopTest do
     test "returns empty for nil started_at" do
       assert Top.format_duration(%{status: :running, started_at: nil, finished_at: nil}) == ""
     end
+
+    test "formats duration for registered sessions using inserted_at" do
+      inserted = DateTime.utc_now() |> DateTime.add(-30, :second)
+
+      result =
+        Top.format_duration(%{status: :registered, inserted_at: inserted, started_at: nil})
+
+      assert result == "30s"
+    end
+
+    test "returns empty for registered without inserted_at" do
+      assert Top.format_duration(%{status: :registered, inserted_at: nil}) == ""
+    end
   end
 
   describe "format_uptime/1" do
@@ -155,6 +173,10 @@ defmodule SubagentSupervisor.TopTest do
       result = Top.truncate_command(long_cmd)
       assert byte_size(result) == 40
       assert String.ends_with?(result, "...")
+    end
+
+    test "returns empty string for nil" do
+      assert Top.truncate_command(nil) == ""
     end
   end
 
@@ -369,6 +391,69 @@ defmodule SubagentSupervisor.TopTest do
       model = %Top{daemon: :ignored, view_mode: :dashboard, all_jobs: [], navigable_rows: []}
       updated = Top.update(model, {:event, %{key: key(:enter)}})
       assert updated.view_mode == :dashboard
+    end
+
+    test "enter switches to session_detail mode when a registered job is selected" do
+      job = %{
+        id: "job_reg123",
+        status: :registered,
+        owner: "owner-session",
+        session_id: "sess-abc",
+        command: nil,
+        inserted_at: DateTime.utc_now()
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :dashboard,
+        selected_index: 1,
+        all_jobs: [job],
+        navigable_rows: [{:owner, "owner-session"}, {:job, job}]
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:enter)}})
+      assert updated.view_mode == :session_detail
+      assert updated.selected_job_id == "job_reg123"
+    end
+  end
+
+  describe "update/2 - session_detail mode" do
+    test "escape returns to dashboard from session_detail" do
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :session_detail,
+        selected_job_id: "job_reg123",
+        output_verbose: true,
+        output_scroll: 5
+      }
+
+      updated = Top.update(model, {:event, %{key: key(:esc)}})
+      assert updated.view_mode == :dashboard
+      assert updated.selected_job_id == nil
+      assert updated.selected_job_output == []
+      assert updated.output_verbose == false
+      assert updated.output_scroll == 0
+    end
+
+    test "q does not halt in session_detail mode" do
+      model = %Top{daemon: :ignored, view_mode: :session_detail}
+      updated = Top.update(model, {:event, %{ch: ?q}})
+      assert updated.view_mode == :session_detail
+    end
+
+    test "C copies in session_detail mode" do
+      job = %{id: "job_copy_reg", status: :registered}
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :session_detail,
+        selected_index: 0,
+        navigable_rows: [{:job, job}]
+      }
+
+      updated = Top.update(model, {:event, %{ch: ?C}})
+      assert updated.flash_until != nil
+      assert updated.flash_index == 0
     end
   end
 
@@ -647,6 +732,154 @@ defmodule SubagentSupervisor.TopTest do
       assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
       output = Canvas.render_to_string(canvas)
       assert output =~ "no output yet"
+    end
+  end
+
+  describe "render/1 - dashboard with registered sessions" do
+    @describetag :tui
+
+    test "renders registered session row without crash when command is nil" do
+      now = DateTime.utc_now()
+
+      session = %{
+        id: "job_reg1234",
+        status: :registered,
+        owner: "owner-sess",
+        session_id: "sess-abc",
+        command: nil,
+        label: "master",
+        inserted_at: now,
+        started_at: nil,
+        finished_at: nil
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        total_jobs: 1,
+        window_height: 30,
+        window_width: 100,
+        all_jobs: [session],
+        navigable_rows: [{:owner, "owner-sess"}, {:job, session}],
+        jobs_by_owner: [%{owner: "owner-sess", jobs: [session]}]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Owner: owner-sess"
+      assert output =~ "sess-abc"
+    end
+
+    test "renders registered session with no session_id" do
+      now = DateTime.utc_now()
+
+      session = %{
+        id: "job_reg5678",
+        status: :registered,
+        owner: "owner-sess2",
+        session_id: nil,
+        command: nil,
+        label: nil,
+        inserted_at: now,
+        started_at: nil,
+        finished_at: nil
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        total_jobs: 1,
+        window_height: 30,
+        window_width: 100,
+        all_jobs: [session],
+        navigable_rows: [{:owner, "owner-sess2"}, {:job, session}],
+        jobs_by_owner: [%{owner: "owner-sess2", jobs: [session]}]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "session"
+    end
+  end
+
+  describe "render/1 - session_detail mode" do
+    @describetag :tui
+
+    test "renders session metadata and child jobs" do
+      now = DateTime.utc_now()
+
+      session = %{
+        id: "job_session1",
+        status: :registered,
+        owner: "owner-detail",
+        session_id: "sess-detail-123",
+        command: nil,
+        label: "planner",
+        cwd: "/tmp/project",
+        inserted_at: now,
+        started_at: nil,
+        finished_at: nil
+      }
+
+      child = %{
+        id: "job_child01",
+        status: :running,
+        owner: "owner-detail",
+        command: "echo work",
+        label: "worker",
+        inserted_at: now,
+        started_at: now,
+        finished_at: nil
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :session_detail,
+        selected_job_id: "job_session1",
+        window_height: 30,
+        window_width: 100,
+        all_jobs: [session, child]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Session: job_sessi.."
+      assert output =~ "owner-detail"
+      assert output =~ "sess-detail-123"
+      assert output =~ "planner"
+      assert output =~ "/tmp/project"
+      assert output =~ "Child Jobs (1)"
+      assert output =~ "job_child.."
+      assert output =~ "running"
+    end
+
+    test "renders session detail with no child jobs" do
+      now = DateTime.utc_now()
+
+      session = %{
+        id: "job_session2",
+        status: :registered,
+        owner: "owner-empty",
+        session_id: "sess-empty",
+        command: nil,
+        label: nil,
+        cwd: "/home/user",
+        inserted_at: now,
+        started_at: nil,
+        finished_at: nil
+      }
+
+      model = %Top{
+        daemon: :ignored,
+        view_mode: :session_detail,
+        selected_job_id: "job_session2",
+        window_height: 30,
+        window_width: 100,
+        all_jobs: [session]
+      }
+
+      assert {:ok, canvas} = Renderer.render(Canvas.from_dimensions(100, 30), Top.render(model))
+      output = Canvas.render_to_string(canvas)
+      assert output =~ "Child Jobs (0)"
+      assert output =~ "no child jobs"
     end
   end
 end

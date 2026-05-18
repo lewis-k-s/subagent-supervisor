@@ -19,6 +19,7 @@ defmodule SubagentSupervisor.Top.View do
       case model.view_mode do
         :dashboard -> render_dashboard(model)
         :output -> render_output(model)
+        :session_detail -> render_session_detail(model)
       end
     end
   end
@@ -117,6 +118,104 @@ defmodule SubagentSupervisor.Top.View do
     end
   end
 
+  defp render_session_detail(model) do
+    job = find_selected_job(model)
+    content_width = output_content_width(model)
+
+    if job do
+      child_jobs =
+        model.all_jobs
+        |> Enum.filter(&(&1.owner == job.owner and &1.id != job.id))
+
+      metadata_lines = session_metadata_lines(job, child_jobs, content_width)
+      visible = output_visible_lines(model)
+
+      rendered =
+        metadata_lines
+        |> Enum.take(visible)
+        |> Enum.map(fn {line, color} ->
+          label(content: pad_line(line, content_width), color: color)
+        end)
+
+      elements = pad_labels(rendered, visible, content_width)
+
+      view(top_bar: session_detail_top_bar(model), bottom_bar: session_detail_bottom_bar()) do
+        panel title: session_detail_title(job), height: :fill do
+          elements
+        end
+      end
+    else
+      view(top_bar: session_detail_top_bar(model), bottom_bar: session_detail_bottom_bar()) do
+        panel title: "Session Detail", height: :fill do
+          label(content: "  Session not found", color: :red)
+        end
+      end
+    end
+  end
+
+  defp session_metadata_lines(job, child_jobs, width) do
+    lines = [
+      {"  Owner:        #{job.owner}", :white},
+      {"  Session ID:   #{job.session_id || "(none)"}", :white},
+      {"  Label:        #{job.label || "(none)"}", :white},
+      {"  CWD:          #{job.cwd || "(unknown)"}", :white},
+      {"  Registered:   #{format_datetime(job.inserted_at)}", :white}
+    ]
+
+    lines =
+      lines ++
+        [
+          {String.duplicate("─", width), :black},
+          {"  Child Jobs (#{length(child_jobs)})", :cyan}
+        ]
+
+    if child_jobs == [] do
+      lines ++ [{"    (no child jobs)", :black}]
+    else
+      header =
+        {"    #{pad("ID", 12)}#{pad("STATUS", 11)}#{pad("DURATION", 8)}#{pad("LABEL", 14)}COMMAND",
+         :cyan}
+
+      child_lines =
+        Enum.map(child_jobs, fn child ->
+          {"  #{Format.status_icon(child.status)} #{pad(Format.truncate_id(child.id), 12)}#{pad(to_string(child.status), 11)}#{pad(Format.format_duration(child), 8)}#{pad(child.label || "", 14)}#{Format.truncate_command(child.command)}",
+           Format.status_color(child.status)}
+        end)
+
+      lines ++ [header] ++ child_lines
+    end
+  end
+
+  defp format_datetime(nil), do: "(unknown)"
+  defp format_datetime(dt), do: DateTime.to_string(dt) |> String.replace("Z", " UTC")
+
+  defp session_detail_top_bar(model) do
+    bar do
+      label(
+        content:
+          " subagent-supervisor | session detail | up #{Format.format_uptime(model.started_at)} | running #{model.running}/#{model.max_concurrency} | queued #{model.queued}",
+        color: :white,
+        background: :blue
+      )
+    end
+  end
+
+  defp session_detail_bottom_bar do
+    bar do
+      label(
+        content: " esc back | C copy id | q quit",
+        color: :black,
+        background: :white
+      )
+    end
+  end
+
+  defp session_detail_title(job) do
+    id = Format.truncate_id(job.id)
+    label_part = if job.label, do: " [#{job.label}]", else: ""
+    "Session: #{id}#{label_part} (#{job.owner})"
+  end
+
   defp output_top_bar(model) do
     bar do
       label(
@@ -208,7 +307,8 @@ defmodule SubagentSupervisor.Top.View do
   defp dashboard_bottom_bar do
     bar do
       label(
-        content: " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output | C copy id",
+        content:
+          " q quit | \u2191\u2193/pgup/pgdn navigate | enter view output/session | C copy id",
         color: :black,
         background: :white
       )
@@ -295,6 +395,22 @@ defmodule SubagentSupervisor.Top.View do
 
   defp flash_background do
     if rem(System.system_time(:millisecond), 500) < 250, do: :blue, else: :cyan
+  end
+
+  defp job_line(%{status: :registered, session_id: session_id} = job) do
+    display = session_id || "session"
+
+    [
+      "  ",
+      Format.status_icon(job.status),
+      " ",
+      pad(Format.truncate_id(job.id), 12),
+      pad(to_string(job.status), 11),
+      pad(Format.format_duration(job), 8),
+      pad(job.label || "", 14),
+      Format.truncate_command(display)
+    ]
+    |> IO.iodata_to_binary()
   end
 
   defp job_line(job) do
