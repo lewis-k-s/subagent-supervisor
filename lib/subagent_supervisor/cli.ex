@@ -139,29 +139,42 @@ defmodule SubagentSupervisor.CLI do
 
   @doc false
   def discover_session_id(cwd) do
-    project_slug =
-      cwd
-      |> String.replace("/", "-")
-      |> String.replace_prefix("-", "")
+    raw_slug = String.replace(cwd, "/", "-")
+    stripped_slug = String.replace_prefix(raw_slug, "-", "")
 
-    dir = Path.join([System.user_home!(), ".claude", "projects", project_slug])
+    [raw_slug, stripped_slug]
+    |> Enum.uniq()
+    |> Enum.find_value(&discover_session_id_in_project/1)
+  end
 
-    case File.ls(dir) do
-      {:ok, files} ->
-        files
-        |> Enum.filter(&String.ends_with?(&1, ".jsonl"))
-        |> Enum.map(fn f -> {f, Path.join(dir, f)} end)
-        |> Enum.filter(fn {_, p} -> File.exists?(p) end)
-        |> Enum.sort_by(fn {_, p} -> File.stat!(p).mtime end, :desc)
-        |> List.first()
-        |> case do
-          {name, _} -> String.replace_suffix(name, ".jsonl", "")
-          nil -> nil
-        end
+  defp discover_session_id_in_project(project_slug) do
+    dir = Path.join([user_home!(), ".claude", "projects", project_slug])
 
-      _ ->
-        nil
+    with {:ok, files} <- File.ls(dir),
+         {name, _path} <-
+           files
+           |> Enum.filter(&String.ends_with?(&1, ".jsonl"))
+           |> Enum.map(fn file -> {file, Path.join(dir, file)} end)
+           |> Enum.filter(fn {_file, path} -> File.exists?(path) end)
+           |> Enum.sort(fn {left_file, left_path}, {right_file, right_path} ->
+             left_mtime = File.stat!(left_path).mtime
+             right_mtime = File.stat!(right_path).mtime
+
+             if left_mtime == right_mtime do
+               left_file <= right_file
+             else
+               left_mtime >= right_mtime
+             end
+           end)
+           |> List.first() do
+      String.replace_suffix(name, ".jsonl", "")
+    else
+      _ -> nil
     end
+  end
+
+  defp user_home! do
+    System.get_env("HOME") || System.user_home!()
   end
 
   defp start(rest) do

@@ -14,8 +14,8 @@ defmodule SubagentSupervisor.Top do
   defstruct [
     :daemon,
     :started_at,
-    :window_height,
-    :window_width,
+    window_height: 24,
+    window_width: 80,
     jobs_by_owner: [],
     all_jobs: [],
     total_jobs: 0,
