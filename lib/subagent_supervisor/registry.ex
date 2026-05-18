@@ -6,18 +6,20 @@ defmodule SubagentSupervisor.Registry do
   use GenServer
 
   alias SubagentSupervisor.Job
+  alias SubagentSupervisor.Registry.Persistence
   alias SubagentSupervisor.StreamJSON
   require Logger
 
   @type wait_mode :: :any | :all
   @write_capable_agents ["sweng-coder"]
+  @jobs_table Module.concat(__MODULE__, Jobs)
 
   @doc """
   Starts the Registry GenServer as a named process.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts) do
-    GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc """
@@ -143,29 +145,44 @@ defmodule SubagentSupervisor.Registry do
   end
 
   @impl true
-  def init(_opts) do
-    output_dir = Path.join(System.tmp_dir!(), "subagent_supervisor")
-    File.mkdir_p!(output_dir)
+  def init(opts) do
+    state_dir = Persistence.state_dir(opts)
+    File.mkdir_p!(Persistence.log_dir(state_dir))
+    ets_table = ensure_ets_table!()
     server_sandbox = detect_server_sandbox()
+    now = DateTime.utc_now()
 
-    {:ok,
-     %{
-       jobs: %{},
-       refs: %{},
-       waiters: [],
-       max_concurrency: max_concurrency(),
-       started_at: DateTime.utc_now(),
-       output_dir: output_dir,
-       allowed_launchers: resolve_allowed_launchers(),
-       server_sandbox: server_sandbox
-     }}
+    {:ok, loaded_jobs} = Persistence.load(state_dir)
+    {loaded_jobs, recovered?} = recover_jobs(loaded_jobs, now)
+    jobs = Map.new(loaded_jobs, &{&1.id, &1})
+
+    if recovered? do
+      Persistence.save!(state_dir, jobs)
+    end
+
+    hydrate_ets!(ets_table, jobs)
+
+    state = %{
+      jobs: jobs,
+      queue: rebuild_queue(jobs),
+      refs: %{},
+      waiters: [],
+      ets_table: ets_table,
+      max_concurrency: Keyword.get(opts, :max_concurrency, max_concurrency()) |> max(1),
+      started_at: now,
+      state_dir: state_dir,
+      allowed_launchers: resolve_allowed_launchers(),
+      server_sandbox: server_sandbox
+    }
+
+    {:ok, start_available_jobs(state)}
   end
 
   @impl true
   def handle_call({:start_job, attrs}, _from, state) do
     case build_job(attrs, state) do
       {:ok, job} ->
-        state = state |> put_job(job) |> start_available_jobs()
+        state = state |> enqueue_job(job) |> start_available_jobs()
         {:reply, {:ok, public_job(Map.fetch!(state.jobs, job.id))}, state}
 
       {:error, reason} ->
@@ -221,11 +238,18 @@ defmodule SubagentSupervisor.Registry do
       GenServer.reply(waiter.from, {:error, :reset})
     end)
 
-    File.rm_rf(state.output_dir)
-    File.mkdir_p!(state.output_dir)
+    Persistence.clear!(state.state_dir)
+    :ets.delete_all_objects(state.ets_table)
 
     {:reply, :ok,
-     %{state | jobs: %{}, refs: %{}, waiters: [], max_concurrency: max(max_concurrency, 1)}}
+     %{
+       state
+       | jobs: %{},
+         queue: :queue.new(),
+         refs: %{},
+         waiters: [],
+         max_concurrency: max(max_concurrency, 1)
+     }}
   end
 
   def handle_call(:dashboard_state, _from, state) do
@@ -353,7 +377,7 @@ defmodule SubagentSupervisor.Registry do
       started_at: nil
     }
 
-    state = put_job(state, job)
+    state = commit_job(state, job)
     {:reply, {:ok, public_job(Map.fetch!(state.jobs, id))}, state}
   end
 
@@ -432,33 +456,140 @@ defmodule SubagentSupervisor.Registry do
     {:noreply, %{state | waiters: pending}}
   end
 
-  defp put_job(state, job) do
-    refs = if job.task_ref, do: Map.put(state.refs, job.task_ref, job.id), else: state.refs
-    %{state | jobs: Map.put(state.jobs, job.id, job), refs: refs}
+  defp enqueue_job(state, job) do
+    state = commit_job(state, job)
+    %{state | queue: :queue.in(job.id, state.queue)}
+  end
+
+  defp commit_job(state, %Job{} = job) do
+    jobs = Map.put(state.jobs, job.id, job)
+
+    Persistence.save!(state.state_dir, jobs)
+    :ets.insert(state.ets_table, {job.id, Job.to_persisted_map(job)})
+
+    old_job = Map.get(state.jobs, job.id)
+    refs = update_refs(state.refs, old_job, job)
+
+    %{state | jobs: jobs, refs: refs}
+  end
+
+  defp attach_task_ref(state, id, ref) do
+    case Map.fetch(state.jobs, id) do
+      {:ok, job} ->
+        job = %{job | task_ref: ref}
+        jobs = Map.put(state.jobs, id, job)
+        refs = Map.put(state.refs, ref, id)
+        %{state | jobs: jobs, refs: refs}
+
+      :error ->
+        state
+    end
+  end
+
+  defp update_refs(refs, old_job, new_job) do
+    refs =
+      case old_job do
+        %Job{task_ref: ref} when not is_nil(ref) -> Map.delete(refs, ref)
+        _ -> refs
+      end
+
+    case new_job do
+      %Job{task_ref: ref} when not is_nil(ref) -> Map.put(refs, ref, new_job.id)
+      _ -> refs
+    end
+  end
+
+  defp ensure_ets_table! do
+    case :ets.whereis(@jobs_table) do
+      :undefined ->
+        :ets.new(@jobs_table, [:named_table, :protected, :set, read_concurrency: true])
+
+      table ->
+        :ets.delete_all_objects(table)
+        table
+    end
+  end
+
+  defp hydrate_ets!(table, jobs) do
+    :ets.delete_all_objects(table)
+
+    jobs
+    |> Map.values()
+    |> Enum.each(fn job -> :ets.insert(table, {job.id, Job.to_persisted_map(job)}) end)
+  end
+
+  defp recover_jobs(jobs, now) do
+    Enum.map_reduce(jobs, false, fn job, recovered? ->
+      recovered_job = recover_job(job, now)
+      {recovered_job, recovered? or recovered_job != job}
+    end)
+  end
+
+  defp recover_job(%Job{status: :running} = job, now) do
+    %{
+      job
+      | status: :failed,
+        exit_status: nil,
+        finished_at: now,
+        task_ref: nil,
+        output: append_interruption(job.output)
+    }
+  end
+
+  defp recover_job(%Job{} = job, _now), do: %{job | task_ref: nil}
+
+  defp append_interruption(nil), do: interruption_message()
+  defp append_interruption(""), do: interruption_message()
+  defp append_interruption(output), do: output <> "\n" <> interruption_message()
+
+  defp interruption_message do
+    "Task interrupted: daemon restarted before the process completed."
+  end
+
+  defp rebuild_queue(jobs) do
+    jobs
+    |> Map.values()
+    |> Enum.filter(&(&1.status == :queued))
+    |> sort_jobs()
+    |> Enum.reduce(:queue.new(), fn job, queue -> :queue.in(job.id, queue) end)
   end
 
   defp start_available_jobs(state) do
     available = state.max_concurrency - running_count(state)
 
-    if available <= 0 do
-      state
-    else
-      state.jobs
-      |> Map.values()
-      |> Enum.filter(&(&1.status == :queued))
-      |> sort_jobs()
-      |> Enum.take(available)
-      |> Enum.reduce(state, fn job, acc ->
-        update_job(acc, job.id, &start_job_task(&1, state.output_dir))
-      end)
+    dispatch_queued_jobs(state, available)
+  end
+
+  defp dispatch_queued_jobs(state, available) when available <= 0, do: state
+
+  defp dispatch_queued_jobs(state, available) do
+    case :queue.out(state.queue) do
+      {{:value, id}, queue} ->
+        state = %{state | queue: queue}
+
+        case Map.fetch(state.jobs, id) do
+          {:ok, %Job{status: :queued} = job} ->
+            state
+            |> start_job_task(job)
+            |> dispatch_queued_jobs(available - 1)
+
+          _ ->
+            dispatch_queued_jobs(state, available)
+        end
+
+      {:empty, _queue} ->
+        state
     end
   end
 
-  defp start_job_task(job, output_dir) do
+  defp start_job_task(state, job) do
     started_at = now()
-    output_path = Path.join(output_dir, "#{job.id}.log")
+    output_path = Persistence.log_path(state.state_dir, job.id)
+    File.mkdir_p!(Path.dirname(output_path))
     File.write!(output_path, "")
     command = job.command
+    running_job = %{job | status: :running, started_at: started_at, output_path: output_path}
+    state = commit_job(state, running_job)
 
     task =
       Task.Supervisor.async_nolink(SubagentSupervisor.TaskSupervisor, fn ->
@@ -479,13 +610,7 @@ defmodule SubagentSupervisor.Registry do
         {job.id, started_at, now(), exit_status}
       end)
 
-    %{
-      job
-      | status: :running,
-        started_at: started_at,
-        task_ref: task.ref,
-        output_path: output_path
-    }
+    attach_task_ref(state, running_job.id, task.ref)
   end
 
   defp collect_port_output(port, path) do
@@ -531,9 +656,7 @@ defmodule SubagentSupervisor.Registry do
     case Map.fetch(state.jobs, id) do
       {:ok, job} ->
         updated = fun.(job)
-        refs = if job.task_ref, do: Map.delete(state.refs, job.task_ref), else: state.refs
-        refs = if updated.task_ref, do: Map.put(refs, updated.task_ref, id), else: refs
-        %{state | jobs: Map.put(state.jobs, id, updated), refs: refs}
+        commit_job(state, updated)
 
       :error ->
         state
@@ -617,9 +740,17 @@ defmodule SubagentSupervisor.Registry do
     }
 
     case Keyword.get(opts, :include_output, false) do
-      true -> Map.put(base, :output, job.output)
+      true -> Map.put(base, :output, public_output(job))
       :digest -> Map.put(base, :output, job.output)
       _ -> base
+    end
+  end
+
+  defp public_output(job) do
+    case read_job_output(job) do
+      "" -> job.output || ""
+      nil -> job.output
+      raw -> StreamJSON.extract_text(raw)
     end
   end
 
@@ -632,7 +763,7 @@ defmodule SubagentSupervisor.Registry do
           nil
 
         "" ->
-          ""
+          job.output || ""
 
         raw ->
           text = StreamJSON.extract_text(raw)

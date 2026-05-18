@@ -440,6 +440,91 @@ defmodule SubagentSupervisor.RegistryTest do
     end
   end
 
+  describe "restart recovery" do
+    test "completed jobs remain visible after application restart" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "restart-complete",
+                 "command" => "bash -c 'printf persisted'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, [_]} =
+               SubagentSupervisor.Registry.wait("restart-complete", [job.id], :all, 5_000)
+
+      Application.stop(:subagent_supervisor)
+      Application.ensure_all_started(:subagent_supervisor)
+
+      assert {:ok, found} = SubagentSupervisor.Registry.show(job.id, include_output: true)
+      assert found.status == :succeeded
+      assert found.output == "persisted"
+    end
+
+    test "registered jobs remain visible after application restart" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.register(%{
+                 "owner" => "restart-register",
+                 "session_id" => "registered-session",
+                 "cwd" => File.cwd!()
+               })
+
+      Application.stop(:subagent_supervisor)
+      Application.ensure_all_started(:subagent_supervisor)
+
+      assert {:ok, found} = SubagentSupervisor.Registry.show(job.id)
+      assert found.status == :registered
+      assert found.session_id == "registered-session"
+    end
+
+    @tag max_concurrency: 1
+    test "running jobs from a previous daemon lifetime recover as failed" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "restart-running",
+                 "command" => "bash -c 'printf started; sleep 10'",
+                 "cwd" => File.cwd!()
+               })
+
+      Process.sleep(250)
+
+      Application.stop(:subagent_supervisor)
+      Application.ensure_all_started(:subagent_supervisor)
+
+      assert {:ok, found} = SubagentSupervisor.Registry.show(job.id, include_output: true)
+      assert found.status == :failed
+      assert found.exit_status == nil
+      assert found.output =~ "daemon restarted"
+    end
+
+    @tag max_concurrency: 1
+    test "queued jobs are rebuilt and scheduled after application restart" do
+      assert {:ok, _running} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "restart-queue",
+                 "command" => "bash -c 'sleep 10'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert {:ok, queued} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "restart-queue",
+                 "command" => "bash -c 'printf queued'",
+                 "cwd" => File.cwd!()
+               })
+
+      assert queued.status == :queued
+
+      Application.stop(:subagent_supervisor)
+      Application.ensure_all_started(:subagent_supervisor)
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("restart-queue", [queued.id], :all, 5_000)
+
+      assert finished.status == :succeeded
+      assert finished.output == "queued"
+    end
+  end
+
   describe "command validation" do
     test "rejects commands that do not start with an allowed launcher" do
       assert {:error, reason} =
@@ -500,6 +585,7 @@ defmodule SubagentSupervisor.RegistryTest do
     test "rejects write-capable agents outside sandbox write roots" do
       log =
         capture_log(
+          [level: :info],
           fn ->
             assert {:error, reason} =
                      SubagentSupervisor.Registry.start_job(%{
@@ -511,8 +597,7 @@ defmodule SubagentSupervisor.RegistryTest do
                      })
 
             assert reason =~ "requires write access"
-          end,
-          level: :info
+          end
         )
 
       assert log =~ "subagent launch rejected"
@@ -688,7 +773,7 @@ defmodule SubagentSupervisor.RegistryTest do
       assert {:ok, job} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "session-extract",
-                 "command" => "bash -c 'printf #{shell_escape(json_line)}'",
+                 "command" => "bash -c #{inspect("printf %s #{inspect(json_line)}")}",
                  "cwd" => File.cwd!()
                })
 
@@ -802,10 +887,4 @@ defmodule SubagentSupervisor.RegistryTest do
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)
-
-  defp shell_escape(str) do
-    str
-    |> String.replace("'", "'\\''")
-    |> then(&"'#{&1}'")
-  end
 end
