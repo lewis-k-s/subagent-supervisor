@@ -13,8 +13,12 @@ defmodule SubagentSupervisor.Top.Model do
   @key_page_down key(:pgdn)
   @key_home key(:home)
   @key_end key(:end)
+  @event_mouse event_type(:mouse)
+  @mouse_wheel_up key(:mouse_wheel_up)
+  @mouse_wheel_down key(:mouse_wheel_down)
   @event_resize event_type(:resize)
 
+  @mouse_wheel_debounce_ms 50
   @output_buffer 100
 
   # Vertical: 2 bars (top + bottom) + 2 panel border + 2 panel padding
@@ -85,23 +89,27 @@ defmodule SubagentSupervisor.Top.Model do
         end
 
       {:event, %{ch: ?C}} ->
-        if model.view_mode == :dashboard do
+        if model.view_mode in [:dashboard, :session_detail] do
           handle_copy(model)
         else
           model
         end
 
       {:event, %{key: @key_esc}} ->
-        if model.view_mode == :output do
-          %{
-            model
-            | view_mode: :dashboard,
-              selected_job_id: nil,
-              selected_job_output: [],
-              output_verbose: false,
-              output_scroll: 0,
-              output_byte_offset: 0
-          }
+        if model.view_mode in [:output, :session_detail] do
+          if recent_mouse_wheel?(model) do
+            %{model | last_mouse_wheel_at: nil}
+          else
+            %{
+              model
+              | view_mode: :dashboard,
+                selected_job_id: nil,
+                selected_job_output: [],
+                output_verbose: false,
+                output_scroll: 0,
+                output_byte_offset: 0
+            }
+          end
         else
           model
         end
@@ -137,6 +145,12 @@ defmodule SubagentSupervisor.Top.Model do
 
       {:event, %{key: @key_arrow_down}} ->
         handle_arrow_down(model)
+
+      {:event, %{type: @event_mouse, key: @mouse_wheel_up}} ->
+        handle_arrow_up(model) |> touch_mouse_wheel()
+
+      {:event, %{type: @event_mouse, key: @mouse_wheel_down}} ->
+        handle_arrow_down(model) |> touch_mouse_wheel()
 
       {:event, %{key: @key_page_up}} ->
         handle_page_up(model)
@@ -379,5 +393,15 @@ defmodule SubagentSupervisor.Top.Model do
       | flash_until: DateTime.utc_now() |> DateTime.add(1, :second),
         flash_index: model.selected_index
     }
+  end
+
+  defp touch_mouse_wheel(model) do
+    %{model | last_mouse_wheel_at: System.monotonic_time(:millisecond)}
+  end
+
+  defp recent_mouse_wheel?(%{last_mouse_wheel_at: nil}), do: false
+
+  defp recent_mouse_wheel?(%{last_mouse_wheel_at: ts}) do
+    System.monotonic_time(:millisecond) - ts < @mouse_wheel_debounce_ms
   end
 end

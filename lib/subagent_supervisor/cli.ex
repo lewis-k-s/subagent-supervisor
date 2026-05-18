@@ -7,6 +7,7 @@ defmodule SubagentSupervisor.CLI do
   require Logger
 
   @cookie :subagent_supervisor
+  @default_agent "Plan"
   @termbox_compatible_terms ["xterm", "screen", "rxvt", "linux", "Eterm", "cygwin"]
 
   def main(argv) do
@@ -30,10 +31,15 @@ defmodule SubagentSupervisor.CLI do
     end
   end
 
+  defp server(["logs" | rest]), do: server_logs(rest)
+
   defp server(rest) do
     opts = parse_flags(rest)
     max_concurrency = opts |> Map.get("max-concurrency", "2") |> String.to_integer() |> max(1)
+    log_level = parse_log_level(Map.get(opts, "log-level", default_log_level()))
+    Logger.configure(level: log_level)
     Application.put_env(:subagent_supervisor, :max_concurrency, max_concurrency)
+    ensure_epmd!()
     start_node!(:subagent_supervisor)
     Application.ensure_all_started(:subagent_supervisor)
 
@@ -44,6 +50,23 @@ defmodule SubagentSupervisor.CLI do
     Process.sleep(:infinity)
   rescue
     ArgumentError -> fail("--max-concurrency must be an integer")
+  end
+
+  defp server_logs(rest) do
+    opts = parse_flags(rest)
+    lines = opts |> Map.get("lines", "80") |> String.to_integer() |> max(1)
+    path = daemon_log_path()
+
+    unless File.exists?(path) do
+      fail("daemon log not found: #{path}")
+    end
+
+    path
+    |> File.read!()
+    |> last_lines(lines)
+    |> IO.write()
+  rescue
+    ArgumentError -> fail("--lines must be an integer")
   end
 
   defp stop do
@@ -149,16 +172,17 @@ defmodule SubagentSupervisor.CLI do
     end
 
     opts = parse_flags(flags)
-    agent_name = Map.get(opts, "agent")
+    explicit_agent = Map.get(opts, "agent")
     resume_session = Map.get(opts, "resume-session")
     resume_job = Map.get(opts, "resume-job")
     cwd = Map.get(opts, "cwd", File.cwd!())
+    agent_name = default_agent(explicit_agent, resume_session || resume_job)
 
     cond do
       resume_session && resume_job ->
         fail("--resume-session and --resume-job are mutually exclusive")
 
-      (resume_session || resume_job) && agent_name ->
+      (resume_session || resume_job) && explicit_agent ->
         fail("--resume-session/--resume-job and --agent are mutually exclusive")
 
       true ->
@@ -215,6 +239,7 @@ defmodule SubagentSupervisor.CLI do
       end
 
     command = shell_join([launcher | launcher_args])
+    sandbox_write_roots = sandbox_write_roots()
 
     attrs = %{
       "owner" => session_owner(opts),
@@ -222,7 +247,8 @@ defmodule SubagentSupervisor.CLI do
       "agent" => agent_name,
       "session_id" => resume_session,
       "cwd" => cwd,
-      "command" => command
+      "command" => command,
+      "sandbox_write_roots" => sandbox_write_roots
     }
 
     require_option!(attrs, "owner")
@@ -465,6 +491,7 @@ defmodule SubagentSupervisor.CLI do
     try do
       case Ratatouille.Runtime.Supervisor.start_link(runtime: [app: SubagentSupervisor.Top]) do
         {:ok, pid} ->
+          ExTermbox.Bindings.select_input_mode(Ratatouille.Constants.input_mode(:esc_with_mouse))
           ref = Process.monitor(pid)
 
           receive do
@@ -605,11 +632,11 @@ defmodule SubagentSupervisor.CLI do
   end
 
   defp spawn_daemon! do
-    System.cmd("epmd", ["-daemon"], stderr_to_stdout: true)
+    ensure_epmd!()
 
     bin = resolve_self_binary()
     max_concurrency = Application.get_env(:subagent_supervisor, :max_concurrency, 2)
-    log_path = Path.join([System.tmp_dir!(), "subagent_supervisor", "daemon.log"])
+    log_path = daemon_log_path()
     File.mkdir_p!(Path.dirname(log_path))
 
     Port.open(
@@ -624,6 +651,23 @@ defmodule SubagentSupervisor.CLI do
          ]}
       ]
     )
+  end
+
+  defp ensure_epmd! do
+    case System.cmd("epmd", ["-daemon"], stderr_to_stdout: true) do
+      {_, 0} ->
+        :ok
+
+      {output, status} ->
+        fail("could not start epmd: exit #{status}: #{String.trim(output)}")
+    end
+  rescue
+    error in ErlangError ->
+      fail("could not start epmd: #{Exception.message(error)}")
+  end
+
+  defp daemon_log_path do
+    Path.join([System.tmp_dir!(), "subagent_supervisor", "daemon.log"])
   end
 
   defp resolve_self_binary do
@@ -653,6 +697,51 @@ defmodule SubagentSupervisor.CLI do
 
   defp await_daemon!(daemon, 0) do
     fail("daemon #{daemon} did not start after 4 seconds")
+  end
+
+  defp sandbox_write_roots do
+    configured =
+      System.get_env("SUBAGENT_SUPERVISOR_SANDBOX_WRITE_ROOTS") ||
+        System.get_env("SUBAGENT_SUPERVISOR_SANDBOX_WRITABLE_ROOTS")
+
+    cond do
+      configured && configured != "" ->
+        split_path_list(configured)
+
+      codex_sandbox?() ->
+        [File.cwd!(), System.tmp_dir!()]
+
+      true ->
+        []
+    end
+  end
+
+  defp codex_sandbox? do
+    System.get_env("CODEX_SANDBOX") == "seatbelt" or System.get_env("CODEX_SHELL") == "1"
+  end
+
+  defp split_path_list(value) do
+    value
+    |> String.split([":", "\n"], trim: true)
+    |> Enum.map(&Path.expand/1)
+  end
+
+  defp default_log_level do
+    System.get_env("SUBAGENT_SUPERVISOR_LOG_LEVEL") || "info"
+  end
+
+  defp parse_log_level(level) when is_atom(level), do: level
+
+  defp parse_log_level(level) do
+    case String.downcase(to_string(level)) do
+      "debug" -> :debug
+      "info" -> :info
+      "warning" -> :warning
+      "warn" -> :warning
+      "error" -> :error
+      "none" -> :none
+      other -> fail("invalid --log-level #{other}; expected debug, info, warning, error, or none")
+    end
   end
 
   defp print_result({:ok, value}) do
@@ -710,12 +799,33 @@ defmodule SubagentSupervisor.CLI do
 
   defp parse_flags([bad | _], _acc), do: fail("expected --key value flag, got #{bad}")
 
+  defp last_lines(content, count) do
+    trailing_newline? = String.ends_with?(content, "\n")
+
+    lines =
+      content
+      |> String.split("\n", trim: false)
+      |> then(fn lines ->
+        if trailing_newline?, do: Enum.drop(lines, -1), else: lines
+      end)
+      |> Enum.take(-count)
+
+    suffix = if trailing_newline? and lines != [], do: "\n", else: ""
+    Enum.join(lines, "\n") <> suffix
+  end
+
   @doc false
   def split_csv(""), do: []
   def split_csv(value), do: value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 
   @doc false
   def session_owner(opts), do: Map.get(opts, "owner") || Map.get(opts, "session")
+
+  @doc false
+  def default_agent(nil, nil), do: @default_agent
+  def default_agent(nil, false), do: @default_agent
+  def default_agent(nil, _resume), do: nil
+  def default_agent(agent, _resume), do: agent
 
   @doc false
   def new_session_id(prefix \\ "session") do
@@ -766,7 +876,8 @@ defmodule SubagentSupervisor.CLI do
 
   defp help do
     IO.puts("""
-    subagent-supervisor server [--max-concurrency 2]
+    subagent-supervisor server [--max-concurrency 2] [--log-level info]
+    subagent-supervisor server logs [--lines 80]
     subagent-supervisor stop
     subagent-supervisor session [--prefix PREFIX]
     subagent-supervisor agents [--cwd DIR]

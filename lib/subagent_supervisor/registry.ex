@@ -7,8 +7,10 @@ defmodule SubagentSupervisor.Registry do
 
   alias SubagentSupervisor.Job
   alias SubagentSupervisor.StreamJSON
+  require Logger
 
   @type wait_mode :: :any | :all
+  @write_capable_agents ["sweng-coder"]
 
   @doc """
   Starts the Registry GenServer as a named process.
@@ -27,7 +29,7 @@ defmodule SubagentSupervisor.Registry do
   Returns `{:ok, job_map}` on success or raises `ArgumentError` if required
   attributes are missing.
   """
-  @spec start_job(map()) :: {:ok, map()} | no_return()
+  @spec start_job(map()) :: {:ok, map()} | {:error, String.t()}
   def start_job(attrs) when is_map(attrs) do
     GenServer.call(__MODULE__, {:start_job, attrs})
   end
@@ -144,6 +146,7 @@ defmodule SubagentSupervisor.Registry do
   def init(_opts) do
     output_dir = Path.join(System.tmp_dir!(), "subagent_supervisor")
     File.mkdir_p!(output_dir)
+    server_sandbox = detect_server_sandbox()
 
     {:ok,
      %{
@@ -153,38 +156,22 @@ defmodule SubagentSupervisor.Registry do
        max_concurrency: max_concurrency(),
        started_at: DateTime.utc_now(),
        output_dir: output_dir,
-       allowed_launchers: resolve_allowed_launchers()
+       allowed_launchers: resolve_allowed_launchers(),
+       server_sandbox: server_sandbox
      }}
   end
 
   @impl true
   def handle_call({:start_job, attrs}, _from, state) do
-    owner = required!(attrs, "owner")
-    command = required!(attrs, "command")
-    validate_command!(command, state.allowed_launchers)
-    cwd = Map.get(attrs, "cwd", File.cwd!())
-    label = Map.get(attrs, "label")
-    agent = Map.get(attrs, "agent")
-    id = Map.get(attrs, "id", new_id())
-    inserted_at = now()
+    case build_job(attrs, state) do
+      {:ok, job} ->
+        state = state |> put_job(job) |> start_available_jobs()
+        {:reply, {:ok, public_job(Map.fetch!(state.jobs, job.id))}, state}
 
-    if agent, do: validate_agent!(agent, cwd)
-
-    job = %Job{
-      id: id,
-      owner: owner,
-      command: command,
-      cwd: cwd,
-      label: label,
-      agent: agent,
-      session_id: Map.get(attrs, "session_id"),
-      status: :queued,
-      inserted_at: inserted_at,
-      started_at: nil
-    }
-
-    state = state |> put_job(job) |> start_available_jobs()
-    {:reply, {:ok, public_job(Map.fetch!(state.jobs, id))}, state}
+      {:error, reason} ->
+        log_failed_launch(attrs, reason)
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:list, owner}, _from, state) do
@@ -265,6 +252,7 @@ defmodule SubagentSupervisor.Registry do
       queued: queued,
       max_concurrency: state.max_concurrency,
       started_at: state.started_at,
+      server_sandbox: state.server_sandbox,
       supervision_tree: [
         %{
           name: "SubagentSupervisor.Supervisor",
@@ -343,7 +331,7 @@ defmodule SubagentSupervisor.Registry do
   def handle_call({:register, attrs}, _from, state) do
     owner = required!(attrs, "owner")
     session_id = Map.get(attrs, "session_id")
-    cwd = Map.get(attrs, "cwd", File.cwd!())
+    cwd = normalize_existing_dir!(Map.get(attrs, "cwd", File.cwd!()))
     label = Map.get(attrs, "label")
     id = Map.get(attrs, "id", new_id())
     inserted_at = now()
@@ -355,6 +343,10 @@ defmodule SubagentSupervisor.Registry do
       cwd: cwd,
       label: label,
       agent: nil,
+      sandbox_write_roots: [],
+      sandbox_write_bounded: false,
+      cwd_writable: true,
+      server_sandbox: state.server_sandbox,
       session_id: session_id,
       status: :registered,
       inserted_at: inserted_at,
@@ -478,7 +470,8 @@ defmodule SubagentSupervisor.Registry do
               :use_stdio,
               :exit_status,
               {:args, ["-lc", "(#{command}) < /dev/null 2>&1"]},
-              {:cd, String.to_charlist(job.cwd)}
+              {:cd, String.to_charlist(job.cwd)},
+              {:env, job_env(job)}
             ]
           )
 
@@ -510,6 +503,22 @@ defmodule SubagentSupervisor.Registry do
 
         code
     end
+  end
+
+  defp job_env(job) do
+    roots = Enum.join(job.sandbox_write_roots || [], ":")
+
+    [
+      {~c"SUBAGENT_SUPERVISOR_CWD", String.to_charlist(job.cwd)},
+      {~c"SUBAGENT_SUPERVISOR_CWD_WRITABLE", if(job.cwd_writable, do: ~c"1", else: ~c"0")},
+      {~c"SUBAGENT_SUPERVISOR_SANDBOX_WRITE_BOUNDED",
+       if(job.sandbox_write_bounded, do: ~c"1", else: ~c"0")},
+      {~c"SUBAGENT_SUPERVISOR_SANDBOX_WRITE_ROOTS", String.to_charlist(roots)},
+      {~c"SUBAGENT_SUPERVISOR_SERVER_SANDBOX_INHERITED",
+       if(job.server_sandbox.inherited, do: ~c"1", else: ~c"0")},
+      {~c"SUBAGENT_SUPERVISOR_SERVER_SANDBOX_KIND",
+       String.to_charlist(to_string(job.server_sandbox.kind))}
+    ]
   end
 
   defp running_count(state) do
@@ -593,6 +602,10 @@ defmodule SubagentSupervisor.Registry do
       agent: job.agent,
       command: job.command,
       cwd: job.cwd,
+      cwd_writable: job.cwd_writable,
+      sandbox_write_roots: job.sandbox_write_roots,
+      sandbox_write_bounded: job.sandbox_write_bounded,
+      server_sandbox: job.server_sandbox,
       session_id: job.session_id,
       accepted: true,
       observable: true,
@@ -712,15 +725,204 @@ defmodule SubagentSupervisor.Registry do
     SubagentSupervisor.Launcher.allowed_launchers()
   end
 
-  defp validate_command!(command, allowed_launchers) do
-    unless Enum.any?(allowed_launchers, fn launcher ->
-             command == launcher or
-               String.starts_with?(command, launcher <> " ") or
-               command == shell_quote_launcher(launcher) or
-               String.starts_with?(command, shell_quote_launcher(launcher) <> " ")
-           end) do
-      raise ArgumentError,
-            "command rejected: must use an allowed launcher (#{inspect(allowed_launchers)}), got: #{command}"
+  defp build_job(attrs, state) do
+    with {:ok, owner} <- required(attrs, "owner"),
+         {:ok, command} <- required(attrs, "command"),
+         :ok <- validate_command(command, state.allowed_launchers),
+         {:ok, cwd} <- normalize_existing_dir(Map.get(attrs, "cwd", File.cwd!())) do
+      label = Map.get(attrs, "label")
+      agent = Map.get(attrs, "agent")
+      client_write_roots = normalize_write_roots(Map.get(attrs, "sandbox_write_roots", []))
+      sandbox_write_roots = effective_write_roots(client_write_roots, state.server_sandbox)
+      sandbox_write_bounded = write_roots_bounded?(client_write_roots, state.server_sandbox)
+      cwd_writable = cwd_writable?(cwd, sandbox_write_roots, sandbox_write_bounded)
+      id = Map.get(attrs, "id", new_id())
+      inserted_at = now()
+
+      with :ok <- validate_agent_write_policy(agent, cwd, cwd_writable, sandbox_write_roots),
+           :ok <- validate_agent(agent, cwd) do
+        {:ok,
+         %Job{
+           id: id,
+           owner: owner,
+           command: command,
+           cwd: cwd,
+           label: label,
+           agent: agent,
+           sandbox_write_roots: sandbox_write_roots,
+           sandbox_write_bounded: sandbox_write_bounded,
+           cwd_writable: cwd_writable,
+           server_sandbox: state.server_sandbox,
+           session_id: Map.get(attrs, "session_id"),
+           status: :queued,
+           inserted_at: inserted_at,
+           started_at: nil
+         }}
+      end
+    end
+  end
+
+  defp log_failed_launch(attrs, reason) do
+    Logger.info(fn ->
+      owner = Map.get(attrs, "owner") || Map.get(attrs, "session")
+      label = Map.get(attrs, "label")
+      agent = Map.get(attrs, "agent")
+      cwd = Map.get(attrs, "cwd")
+
+      "subagent launch rejected owner=#{inspect(owner)} label=#{inspect(label)} agent=#{inspect(agent)} cwd=#{inspect(cwd)} reason=#{reason}"
+    end)
+  end
+
+  defp detect_server_sandbox do
+    inherited =
+      codex_sandbox_env?() or System.get_env("SUBAGENT_SUPERVISOR_INHERITED_SANDBOX") == "1"
+
+    roots = configured_sandbox_write_roots()
+
+    roots =
+      cond do
+        roots != [] ->
+          roots
+
+        inherited ->
+          [File.cwd!(), System.tmp_dir!()] |> normalize_write_roots()
+
+        true ->
+          []
+      end
+
+    %{
+      inherited: inherited,
+      kind: if(inherited, do: :codex, else: :none),
+      write_roots: roots,
+      source: sandbox_source(inherited, roots)
+    }
+  end
+
+  defp configured_sandbox_write_roots do
+    configured =
+      System.get_env("SUBAGENT_SUPERVISOR_SERVER_SANDBOX_WRITE_ROOTS") ||
+        System.get_env("SUBAGENT_SUPERVISOR_SANDBOX_WRITE_ROOTS") ||
+        System.get_env("SUBAGENT_SUPERVISOR_SANDBOX_WRITABLE_ROOTS")
+
+    normalize_write_roots(configured || [])
+  end
+
+  defp codex_sandbox_env? do
+    System.get_env("CODEX_SANDBOX") == "seatbelt" or System.get_env("CODEX_SHELL") == "1"
+  end
+
+  defp sandbox_source(false, []), do: :none
+  defp sandbox_source(true, []), do: :codex_env
+  defp sandbox_source(_, _roots), do: :env_roots
+
+  defp effective_write_roots(client_roots, %{inherited: true, write_roots: server_roots})
+       when client_roots != [] and server_roots != [] do
+    intersect_roots(client_roots, server_roots)
+  end
+
+  defp effective_write_roots(_client_roots, %{inherited: true, write_roots: server_roots})
+       when server_roots != [] do
+    server_roots
+  end
+
+  defp effective_write_roots(client_roots, _server_sandbox), do: client_roots
+
+  defp intersect_roots(left, right) do
+    for a <- left,
+        b <- right,
+        root = narrower_root(a, b),
+        root != nil,
+        uniq: true do
+      root
+    end
+  end
+
+  defp narrower_root(a, b) do
+    cond do
+      path_inside?(a, b) -> a
+      path_inside?(b, a) -> b
+      true -> nil
+    end
+  end
+
+  defp normalize_write_roots(roots) when is_list(roots) do
+    roots
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&to_string/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&normalize_path/1)
+  end
+
+  defp normalize_write_roots(roots) when is_binary(roots) do
+    roots
+    |> String.split([":", "\n"], trim: true)
+    |> normalize_write_roots()
+  end
+
+  defp normalize_write_roots(_), do: []
+
+  defp write_roots_bounded?(_client_roots, %{inherited: true}), do: true
+  defp write_roots_bounded?(client_roots, _server_sandbox), do: client_roots != []
+
+  defp cwd_writable?(_cwd, [], false), do: true
+  defp cwd_writable?(_cwd, [], true), do: false
+
+  defp cwd_writable?(cwd, roots, _bounded) do
+    Enum.any?(roots, &path_inside?(cwd, &1))
+  end
+
+  defp path_inside?(path, root) do
+    path = normalize_path(path)
+    root = normalize_path(root)
+
+    path == root or String.starts_with?(path, root <> "/")
+  end
+
+  defp normalize_path(path) do
+    path
+    |> to_string()
+    |> Path.expand()
+  end
+
+  defp normalize_existing_dir(path) do
+    path = normalize_path(path)
+
+    if File.dir?(path) do
+      {:ok, path}
+    else
+      {:error, "cwd must be an existing directory: #{path}"}
+    end
+  end
+
+  defp normalize_existing_dir!(path) do
+    case normalize_existing_dir(path) do
+      {:ok, path} -> path
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  defp validate_agent_write_policy(nil, _cwd, _cwd_writable, _roots), do: :ok
+
+  defp validate_agent_write_policy(agent, cwd, false, roots)
+       when agent in @write_capable_agents do
+    {:error,
+     "agent #{agent} requires write access, but cwd #{cwd} is outside sandbox write roots #{inspect(roots)}"}
+  end
+
+  defp validate_agent_write_policy(_agent, _cwd, _cwd_writable, _roots), do: :ok
+
+  defp validate_command(command, allowed_launchers) do
+    if Enum.any?(allowed_launchers, fn launcher ->
+         command == launcher or
+           String.starts_with?(command, launcher <> " ") or
+           command == shell_quote_launcher(launcher) or
+           String.starts_with?(command, shell_quote_launcher(launcher) <> " ")
+       end) do
+      :ok
+    else
+      {:error,
+       "command rejected: must use an allowed launcher (#{inspect(allowed_launchers)}), got: #{command}"}
     end
   end
 
@@ -732,7 +934,9 @@ defmodule SubagentSupervisor.Registry do
     end
   end
 
-  defp validate_agent!(agent_name, cwd) do
+  defp validate_agent(nil, _cwd), do: :ok
+
+  defp validate_agent(agent_name, cwd) do
     case SubagentSupervisor.Agents.validate(agent_name, cwd) do
       {:ok, _} ->
         :ok
@@ -744,9 +948,16 @@ defmodule SubagentSupervisor.Registry do
           |> Enum.sort()
           |> Enum.join(", ")
 
-        raise ArgumentError,
-              "unknown agent: #{name}" <>
-                if(available != "", do: " (available: #{available})", else: "")
+        {:error,
+         "unknown agent: #{name}" <>
+           if(available != "", do: " (available: #{available})", else: "")}
+    end
+  end
+
+  defp required(attrs, key) do
+    case Map.fetch(attrs, key) do
+      {:ok, value} when value not in [nil, ""] -> {:ok, value}
+      _ -> {:error, "missing required #{key}"}
     end
   end
 end

@@ -1,5 +1,6 @@
 defmodule SubagentSupervisor.RegistryTest do
   use ExUnit.Case
+  import ExUnit.CaptureLog
 
   setup context do
     max_concurrency = Map.get(context, :max_concurrency, 2)
@@ -26,6 +27,35 @@ defmodule SubagentSupervisor.RegistryTest do
     assert finished.status == :succeeded
     assert finished.exit_status == 0
     assert finished.output == "hello"
+  end
+
+  test "sets job cwd in subprocess environment" do
+    cwd =
+      Path.join(
+        System.tmp_dir!(),
+        "subagent-supervisor-cwd-env-test-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(cwd)
+
+    on_exit(fn -> File.rm_rf(cwd) end)
+
+    assert {:ok, job} =
+             SubagentSupervisor.Registry.start_job(%{
+               "owner" => "cwd-env-test",
+               "command" =>
+                 "bash -c 'printf \"%s|%s\" \"$SUBAGENT_SUPERVISOR_CWD\" \"$(pwd -P)\"'",
+               "cwd" => cwd
+             })
+
+    assert {:ok, [finished]} =
+             SubagentSupervisor.Registry.wait("cwd-env-test", [job.id], :all, 5_000)
+
+    assert finished.status == :succeeded
+
+    [env_cwd, port_cwd] = String.split(finished.output, "|", parts: 2)
+    assert env_cwd == cwd
+    assert Path.basename(port_cwd) == Path.basename(cwd)
   end
 
   test "start_job confirms accepted observable jobs" do
@@ -87,22 +117,20 @@ defmodule SubagentSupervisor.RegistryTest do
     assert second.output == "second"
   end
 
-  test "start_job raises on missing owner" do
-    assert catch_exit(
+  test "start_job returns error on missing owner" do
+    assert {:error, "missing required owner"} =
              SubagentSupervisor.Registry.start_job(%{
                "command" => "bash -c 'echo hi'",
                "cwd" => File.cwd!()
              })
-           )
   end
 
-  test "start_job raises on missing command" do
-    assert catch_exit(
+  test "start_job returns error on missing command" do
+    assert {:error, "missing required command"} =
              SubagentSupervisor.Registry.start_job(%{
                "owner" => "test",
                "cwd" => File.cwd!()
              })
-           )
   end
 
   test "show returns not_found for unknown id" do
@@ -414,23 +442,27 @@ defmodule SubagentSupervisor.RegistryTest do
 
   describe "command validation" do
     test "rejects commands that do not start with an allowed launcher" do
-      assert catch_exit(
+      assert {:error, reason} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "validate-test",
                  "command" => "/usr/bin/python3 -c 'print(1)'",
                  "cwd" => File.cwd!()
                })
-             )
+
+      assert reason =~ "command rejected"
+      assert Process.whereis(SubagentSupervisor.Registry)
     end
 
     test "rejects launcher followed by semicolon (shell injection)" do
-      assert catch_exit(
+      assert {:error, reason} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "validate-test",
                  "command" => "bash; echo injected",
                  "cwd" => File.cwd!()
                })
-             )
+
+      assert reason =~ "command rejected"
+      assert Process.whereis(SubagentSupervisor.Registry)
     end
 
     test "accepts launcher followed by a space and arguments" do
@@ -449,6 +481,112 @@ defmodule SubagentSupervisor.RegistryTest do
                  "command" => "bash",
                  "cwd" => File.cwd!()
                })
+    end
+
+    test "rejects cwd that is not an existing directory" do
+      missing = Path.join(System.tmp_dir!(), "missing-cwd-#{System.unique_integer([:positive])}")
+
+      assert {:error, reason} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "validate-test",
+                 "command" => "bash -c 'printf no'",
+                 "cwd" => missing
+               })
+
+      assert reason =~ "cwd must be an existing directory"
+      assert Process.whereis(SubagentSupervisor.Registry)
+    end
+
+    test "rejects write-capable agents outside sandbox write roots" do
+      log =
+        capture_log(
+          fn ->
+            assert {:error, reason} =
+                     SubagentSupervisor.Registry.start_job(%{
+                       "owner" => "validate-test",
+                       "command" => "bash -c 'printf denied'",
+                       "agent" => "sweng-coder",
+                       "cwd" => File.cwd!(),
+                       "sandbox_write_roots" => [System.tmp_dir!()]
+                     })
+
+            assert reason =~ "requires write access"
+          end,
+          level: :info
+        )
+
+      assert log =~ "subagent launch rejected"
+      assert log =~ "agent=\"sweng-coder\""
+      assert Process.whereis(SubagentSupervisor.Registry)
+    end
+
+    test "allows exploration agents outside sandbox write roots as read-only cwd" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "validate-test",
+                 "command" => "bash -c 'printf readonly'",
+                 "agent" => "Explore",
+                 "cwd" => File.cwd!(),
+                 "sandbox_write_roots" => [System.tmp_dir!()]
+               })
+
+      assert job.cwd_writable == false
+    end
+
+    test "passes cwd writable policy to subprocess environment" do
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "validate-test",
+                 "command" =>
+                   "bash -c 'printf \"%s|%s\" \"$SUBAGENT_SUPERVISOR_CWD_WRITABLE\" \"$SUBAGENT_SUPERVISOR_SANDBOX_WRITE_ROOTS\"'",
+                 "cwd" => File.cwd!(),
+                 "sandbox_write_roots" => [System.tmp_dir!()]
+               })
+
+      assert {:ok, [finished]} =
+               SubagentSupervisor.Registry.wait("validate-test", [job.id], :all, 5_000)
+
+      assert finished.output == "0|#{Path.expand(System.tmp_dir!())}"
+    end
+
+    test "intersects client write roots with inherited server sandbox roots" do
+      old_server_roots = System.get_env("SUBAGENT_SUPERVISOR_SERVER_SANDBOX_WRITE_ROOTS")
+      old_inherited = System.get_env("SUBAGENT_SUPERVISOR_INHERITED_SANDBOX")
+      old_codex_sandbox = System.get_env("CODEX_SANDBOX")
+      old_codex_shell = System.get_env("CODEX_SHELL")
+
+      System.put_env("SUBAGENT_SUPERVISOR_SERVER_SANDBOX_WRITE_ROOTS", System.tmp_dir!())
+      System.put_env("SUBAGENT_SUPERVISOR_INHERITED_SANDBOX", "1")
+      System.delete_env("CODEX_SANDBOX")
+      System.delete_env("CODEX_SHELL")
+
+      Application.stop(:subagent_supervisor)
+      Application.ensure_all_started(:subagent_supervisor)
+      :ok = SubagentSupervisor.Registry.reset_for_test(2)
+
+      on_exit(fn ->
+        restore_env("SUBAGENT_SUPERVISOR_SERVER_SANDBOX_WRITE_ROOTS", old_server_roots)
+        restore_env("SUBAGENT_SUPERVISOR_INHERITED_SANDBOX", old_inherited)
+        restore_env("CODEX_SANDBOX", old_codex_sandbox)
+        restore_env("CODEX_SHELL", old_codex_shell)
+        Application.stop(:subagent_supervisor)
+        Application.ensure_all_started(:subagent_supervisor)
+      end)
+
+      assert {:ok, job} =
+               SubagentSupervisor.Registry.start_job(%{
+                 "owner" => "validate-test",
+                 "command" => "bash -c 'printf constrained'",
+                 "agent" => "Explore",
+                 "cwd" => File.cwd!(),
+                 "sandbox_write_roots" => [File.cwd!()]
+               })
+
+      assert job.cwd_writable == false
+      assert job.sandbox_write_roots == []
+      assert job.sandbox_write_bounded == true
+      assert job.server_sandbox.inherited == true
+      assert job.server_sandbox.write_roots == [Path.expand(System.tmp_dir!())]
     end
   end
 
@@ -497,15 +635,17 @@ defmodule SubagentSupervisor.RegistryTest do
       assert job.agent == nil
     end
 
-    test "start_job raises on unknown agent" do
-      assert catch_exit(
+    test "start_job returns error on unknown agent" do
+      assert {:error, reason} =
                SubagentSupervisor.Registry.start_job(%{
                  "owner" => "bad-agent",
                  "command" => "bash -c 'printf hello'",
                  "agent" => "nonexistent-agent",
                  "cwd" => File.cwd!()
                })
-             )
+
+      assert reason =~ "unknown agent: nonexistent-agent"
+      assert Process.whereis(SubagentSupervisor.Registry)
     end
 
     test "public_job includes agent field" do

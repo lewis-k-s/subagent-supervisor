@@ -67,6 +67,18 @@ defmodule SubagentSupervisor.CLITest do
     end
   end
 
+  describe "default_agent/2" do
+    test "defaults new starts to Plan" do
+      assert SubagentSupervisor.CLI.default_agent(nil, nil) == "Plan"
+      assert SubagentSupervisor.CLI.default_agent(nil, false) == "Plan"
+    end
+
+    test "preserves explicit agents and skips default for resumes" do
+      assert SubagentSupervisor.CLI.default_agent("sweng-coder", nil) == "sweng-coder"
+      assert SubagentSupervisor.CLI.default_agent(nil, "session-id") == nil
+    end
+  end
+
   describe "normalize_top_terminal_env!/0" do
     setup do
       original_term = System.get_env("TERM")
@@ -105,6 +117,7 @@ defmodule SubagentSupervisor.CLITest do
     test "help prints usage" do
       output = capture_io(fn -> SubagentSupervisor.CLI.main([]) end)
       assert output =~ "subagent-supervisor server"
+      assert output =~ "subagent-supervisor server logs"
       assert output =~ "subagent-supervisor session"
       assert output =~ "subagent-supervisor start"
       assert output =~ "subagent-supervisor agents"
@@ -112,6 +125,25 @@ defmodule SubagentSupervisor.CLITest do
       assert output =~ "subagent-supervisor register"
       assert output =~ "--resume-session"
       assert output =~ "--resume-job"
+    end
+
+    test "server logs prints recent daemon log lines" do
+      log_path = Path.join([System.tmp_dir!(), "subagent_supervisor", "daemon.log"])
+      old_content = if File.exists?(log_path), do: File.read!(log_path), else: nil
+      File.mkdir_p!(Path.dirname(log_path))
+      File.write!(log_path, "one\ntwo\nthree\n")
+
+      on_exit(fn ->
+        case old_content do
+          nil -> File.rm(log_path)
+          content -> File.write!(log_path, content)
+        end
+      end)
+
+      output =
+        capture_io(fn -> SubagentSupervisor.CLI.main(["server", "logs", "--lines", "2"]) end)
+
+      assert output == "two\nthree\n"
     end
   end
 

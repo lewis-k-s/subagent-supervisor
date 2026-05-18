@@ -35,6 +35,7 @@ defmodule SubagentSupervisor.Top do
     navigable_rows: [],
     flash_until: nil,
     flash_index: nil,
+    last_mouse_wheel_at: nil,
     error: nil
   ]
 
